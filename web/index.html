@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Horizon Client Builder</title>
+<meta name="description" content="Build the Horizon Minecraft client (horizon-client.exe and more) with your own .hnmod native mods compiled in.">
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1c2330; --border: #2b3442;
+    --text: #e6edf3; --muted: #8b97a8; --accent: #3fb950; --accent-2: #2ea043;
+    --warn: #d29922; --err: #f85149; --link: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 24px 20px 64px; }
+  header h1 { font-size: 26px; margin: 8px 0 4px; }
+  header h1 .accent { color: var(--accent); }
+  header p { color: var(--muted); margin: 0 0 24px; }
+  header a { color: var(--link); text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 14px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  label small { color: var(--muted); font-weight: 400; }
+  input[type=text], input[type=password], select {
+    width: 100%; padding: 9px 11px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font-size: 14px;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent-2); border-color: transparent; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .row, .row3 { grid-template-columns: 1fr; } }
+  button {
+    background: var(--accent-2); color: #fff; border: 0; border-radius: 7px;
+    padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: var(--accent); }
+  button:disabled { background: #24303f; color: var(--muted); cursor: not-allowed; }
+  button.ghost {
+    background: transparent; border: 1px solid var(--border); color: var(--text);
+    padding: 7px 13px; font-size: 13px; font-weight: 500;
+  }
+  button.ghost:hover { border-color: var(--accent); color: var(--accent); background: transparent; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .tokenline { display: flex; gap: 10px; }
+  .tokenline input { flex: 1; }
+  #who { color: var(--accent); font-weight: 600; }
+  .checkbox { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; }
+  .checkbox input { margin-top: 3px; accent-color: var(--accent-2); }
+  .checkbox span b { display: block; }
+  .checkbox span small { color: var(--muted); }
+  #drop {
+    border: 2px dashed var(--border); border-radius: 8px; padding: 22px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: border-color .15s;
+  }
+  #drop.drag { border-color: var(--accent); color: var(--accent); }
+  #drop b { color: var(--text); }
+  #modlist { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .moditem {
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 12px; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .moditem .size { color: var(--muted); }
+  .moditem button { background: none; border: 0; color: var(--err); cursor: pointer; font-size: 15px; padding: 0 4px; }
+  #build { width: 100%; padding: 13px; font-size: 16px; margin-top: 4px; }
+  #log {
+    background: #0a0d12; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; min-height: 120px; max-height: 340px; overflow-y: auto;
+    font: 12.5px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap;
+  }
+  .line { margin: 0; }
+  .line.ok { color: var(--accent); }
+  .line.err { color: var(--err); }
+  .line.warn { color: var(--warn); }
+  .line.dim { color: var(--muted); }
+  #downloadbox { display: none; margin-top: 14px; padding: 14px; border-radius: 8px;
+    background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.4); }
+  #downloadbox .fname { font-weight: 700; }
+  details { color: var(--muted); font-size: 13.5px; }
+  details summary { cursor: pointer; color: var(--link); }
+  details li { margin: 6px 0; }
+  .warnbox { border: 1px solid rgba(210,153,34,.45); background: rgba(210,153,34,.08);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px; color: var(--text); margin-top: 12px; }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; margin-top: 28px; }
+  footer a { color: var(--link); text-decoration: none; }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Horizon <span class="accent">Client Builder</span></h1>
+    <p>
+      Compile the <a href="https://github.com/horizon-rust/horizon" target="_blank" rel="noopener">Horizon</a>
+      Minecraft client for desktop platforms, with your own
+      <b>.hnmod</b> native mods compiled straight into the executable.
+      Builds run on <a id="repolink" href="https://github.com/Creeperuuu/horizon-client-builder/actions" target="_blank" rel="noopener">GitHub Actions</a>.
+    </p>
+  </header>
+
+  <div class="card">
+    <h2>1 · GitHub token</h2>
+    <div class="tokenline">
+      <input type="password" id="token" placeholder="github_pat_… or ghp_…" autocomplete="off" spellcheck="false">
+      <button id="validate" class="ghost">Check</button>
+    </div>
+    <p class="hint">
+      Your token is kept <b id="priv">in this browser tab's memory only</b> — never saved, never logged,
+      and sent exclusively to <code>api.github.com</code> over HTTPS. It is used to upload your mods,
+      start the build, and fetch the finished executable, then it is gone when you close the tab.
+      <br>Needed scopes on the target repo: <b>Actions: read+write</b>, <b>Contents: read+write</b>,
+      <b>Metadata: read</b> (fine-grained) or <code>repo</code> (classic).
+      <span id="who"></span>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>2 · Build settings</h2>
+    <label for="repo">Repository that runs the build <small>(fork this repo first if it isn't yours)</small></label>
+    <input type="text" id="repo" value="Creeperuuu/horizon-client-builder" spellcheck="false">
+
+    <div class="row3">
+      <div>
+        <label for="ref">Horizon source <small>branch / tag / commit</small></label>
+        <input type="text" id="ref" value="main" spellcheck="false">
+      </div>
+      <div>
+        <label for="platform">Platform</label>
+        <select id="platform">
+          <option value="windows-x64" selected>Windows x64 — horizon-client.exe</option>
+          <option value="linux-x64">Linux x64 — horizon-client</option>
+          <option value="linux-arm64">Linux ARM64 — horizon-client</option>
+          <option value="macos-arm64">macOS Apple Silicon — horizon-client</option>
+        </select>
+      </div>
+      <div>
+        <label for="profile">Profile</label>
+        <select id="profile">
+          <option value="fast" selected>Fast (dev, quick iteration)</option>
+          <option value="release">Release (optimized)</option>
+        </select>
+      </div>
+    </div>
+
+    <label class="checkbox" style="margin-bottom:4px">
+      <input type="checkbox" id="override" checked>
+      <span>
+        <b>Override mod revisions</b>
+        <small>Rewrite every mod's <code>[compatibility].horizon_revision</code> to this build's Horizon
+        commit — the workaround that lets mods compiled against different Horizon revisions build
+        together. Unchecked, a single agreeing pin selects the Horizon commit and conflicting pins fail the build.</small>
+      </span>
+    </label>
+  </div>
+
+  <div class="card">
+    <h2>3 · .hnmod native mods <small style="text-transform:none">(optional)</small></h2>
+    <div id="drop">
+      <b>Drop .hnmod files here</b> or click to browse — up to 10 files, 40 MiB each
+      <input type="file" id="fileinput" accept=".hnmod" multiple hidden>
+    </div>
+    <div id="modlist"></div>
+    <div class="warnbox">
+      Mods are committed to a <b>temporary public branch</b> while the build runs (deleted right after),
+      and native mods are <b>unsandboxed Rust</b> compiled into your client — only build mods you trust.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4 · Build</h2>
+    <button id="build">Build client</button>
+    <div id="log" aria-live="polite"></div>
+    <div id="downloadbox">
+      <div class="fname" id="dlname"></div>
+      <div class="hint" id="dlmeta"></div>
+      <p style="margin:10px 0 0"><button id="download">Download</button></p>
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>How this works, retention &amp; limits</summary>
+      <ul>
+        <li><b>Flow:</b> your token uploads the .hnmod files to a temporary <code>builder-upload-…</code>
+          branch, dispatches the <code>Build Horizon client</code> workflow, watches it, then downloads the
+          <code>horizon-client-&lt;platform&gt;</code> artifact. The upload branch is deleted by the workflow itself.</li>
+        <li><b>Retention:</b> built clients (artifacts) are deleted by a scheduled sweep about
+          <b>1 hour</b> after the build; completed build/cleanup run history after <b>24 hours</b>;
+          abandoned upload branches after <b>6 hours</b>. Download promptly.</li>
+        <li><b>Mods:</b> up to 10 .hnmod files, 40 MiB each. All mods are applied together into one build —
+          duplicate mod IDs or conflicting hooks fail the build.</li>
+        <li><b>First build per platform is slow</b> (cold cargo cache, ~1–2 h); repeat builds with the same
+          Horizon commit reuse the cache and are much quicker.</li>
+        <li><b>Privacy:</b> no analytics, no server of its own — this is a static page; every request goes
+          from your browser to api.github.com with your token. Closing the tab forgets everything.</li>
+      </ul>
+    </details>
+  </div>
+
+  <footer>Static site · no tokens stored · builds &amp; expiry handled entirely by
+    <a href="https://github.com/Creeperuuu/horizon-client-builder" target="_blank" rel="noopener">GitHub Actions</a>
+  </footer>
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const API = "https://api.github.com";
+let TOKEN = "";           // memory only — never written to storage
+let WHO = null;
+let BUILDING = false;
+let POLL_TIMER = null;
+const DEFAULT_REPO = "Creeperuuu/horizon-client-builder";
+
+// ---------------------------------------------------------------- log ----
+function log(text, cls = "") {
+  const line = document.createElement("p");
+  line.className = "line " + cls;
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  line.textContent = `[${time}] ${text}`;
+  $("log").appendChild(line);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+// ---------------------------------------------------------------- api ----
+async function gh(path, options = {}) {
+  const response = await fetch(API + path, {
+    ...options,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${TOKEN}`,
+      ...(options.body && !(options.body instanceof FormData)
+        ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (body.message) message = body.message;
+    } catch { /* keep status text */ }
+    const err = new Error(message);
+    err.status = response.status;
+    throw err;
+  }
+  if (response.status === 204 || response.headers.get("content-length") === "0") return null;
+  return response.json();
+}
+
+// -------------------------------------------------------------- token ----
+$("validate").addEventListener("click", async () => {
+  TOKEN = $("token").value.trim();
+  $("who").textContent = "";
+  if (!TOKEN) { log("Enter a token first.", "warn"); return; }
+  try {
+    const user = await gh("/user");
+    WHO = user.login;
+    $("who").textContent = ` — signed in as @${WHO}`;
+    log(`Token works — @${WHO}.`, "ok");
+  } catch (err) {
+    WHO = null;
+    log(`Token check failed: ${err.message}`, "err");
+  }
+});
+
+// ---------------------------------------------------------------- mods ---
+const mods = [];
+const fmtSize = (bytes) =>
+  bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MiB`
+  : bytes >= 1024 ? `${(bytes / 1024).toFixed(0)} KiB` : `${bytes} B`;
+
+function renderMods() {
+  const list = $("modlist");
+  list.innerHTML = "";
+  mods.forEach((mod, index) => {
+    const item = document.createElement("div");
+    item.className = "moditem";
+    const name = document.createElement("span");
+    name.textContent = `${mod.name} `;
+    const size = document.createElement("span");
+    size.className = "size";
+    size.textContent = fmtSize(mod.file.size);
+    const remove = document.createElement("button");
+    remove.textContent = "✕";
+    remove.title = "Remove";
+    remove.addEventListener("click", () => { mods.splice(index, 1); renderMods(); });
+    item.append(name, size, remove);
+    list.appendChild(item);
+  });
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    if (!file.name.toLowerCase().endsWith(".hnmod")) {
+      log(`Skipped ${file.name}: not a .hnmod file.`, "warn"); continue;
+    }
+    if (file.size > 40 * 1024 * 1024) {
+      log(`Skipped ${file.name}: larger than 40 MiB.`, "err"); continue;
+    }
+    if (mods.some((m) => m.name === file.name)) {
+      log(`Skipped ${file.name}: already added.`, "warn"); continue;
+    }
+    if (mods.length >= 10) { log("Mod limit is 10 files per build.", "err"); break; }
+    mods.push({ name: file.name, file });
+  }
+  renderMods();
+}
+
+$("drop").addEventListener("click", () => $("fileinput").click());
+$("fileinput").addEventListener("change", (event) => {
+  addFiles([...event.target.files]);
+  event.target.value = "";
+});
+for (const type of ["dragenter", "dragover"]) {
+  $("drop").addEventListener(type, (event) => {
+    event.preventDefault(); $("drop").classList.add("drag");
+  });
+}
+for (const type of ["dragleave", "drop"]) {
+  $("drop").addEventListener(type, (event) => {
+    event.preventDefault(); $("drop").classList.remove("drag");
+  });
+}
+$("drop").addEventListener("drop", (event) => addFiles([...event.dataTransfer.files]));
+
+// ------------------------------------------------------------- helpers ---
+function repoSlug() {
+  const value = $("repo").value.trim().replace(/^https:\/\/github\.com\//i, "").replace(/\.git$/, "");
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) {
+    throw new Error(`Repository must look like owner/name, got "${value}"`);
+  }
+  return value;
+}
+
+async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// -------------------------------------------------------------- build ----
+$("build").addEventListener("click", build);
+window.addEventListener("beforeunload", (event) => {
+  if (BUILDING) { event.preventDefault(); event.returnValue = ""; }
+});
+
+async function build() {
+  if (BUILDING) return;
+  TOKEN = $("token").value.trim();
+  if (!TOKEN) { log("Paste a GitHub token first (section 1).", "err"); return; }
+  BUILDING = true;
+  $("build").disabled = true;
+  $("downloadbox").style.display = "none";
+  $("log").innerHTML = "";
+  clearTimeout(POLL_TIMER);
+
+  let slug, defaultBranch, branchHead, run;
+  const startedAt = Date.now();
+  const useOverride = $("override").checked;
+  const hasMods = mods.length > 0;
+  const uploadBranch = hasMods
+    ? `builder-upload-${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${Math.floor(Math.random() * 9000 + 1000)}`
+    : "";
+  const platform = $("platform").value;
+  const artifactName = `horizon-client-${platform}`;
+
+  try {
+    slug = repoSlug();
+    log(`Target repository: ${slug}`);
+    if (!WHO) {
+      const user = await gh("/user");
+      WHO = user.login;
+      $("who").textContent = ` — signed in as @${WHO}`;
+      log(`Token works — @${WHO}.`, "ok");
+    }
+
+    const repo = await gh(`/repos/${slug}`);
+    defaultBranch = repo.default_branch;
+    $("repolink").href = repo.html_url + "/actions";
+    log(`Repository default branch: ${defaultBranch}.`);
+
+    // ---- upload mods to a temporary branch -------------------------------
+    if (hasMods) {
+      log(`Uploading ${mods.length} mod(s) to temporary branch ${uploadBranch}…`);
+      const ref = await gh(`/repos/${slug}/git/ref/heads/${defaultBranch}`);
+      branchHead = ref.object.sha;
+      await gh(`/repos/${slug}/git/refs`, {
+        method: "POST",
+        body: JSON.stringify({ ref: `refs/heads/${uploadBranch}`, sha: branchHead }),
+      });
+      log(`Branch created at ${branchHead.slice(0, 10)}.`, "ok");
+
+      for (const mod of mods) {
+        const content = await fileToBase64(mod.file);
+        await gh(`/repos/${slug}/contents/mods/${encodeURIComponent(mod.name)}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            message: `Add ${mod.name} for a builder run`,
+            content,
+            branch: uploadBranch,
+          }),
+        });
+        log(`Uploaded ${mod.name} (${fmtSize(mod.file.size)}).`, "ok");
+      }
+    } else {
+      log("No mods selected — building a clean client.");
+    }
+
+    // ---- dispatch the build ---------------------------------------------
+    log("Dispatching the build workflow…");
+    await gh(`/repos/${slug}/actions/workflows/build.yml/dispatches`, {
+      method: "POST",
+      body: JSON.stringify({
+        ref: defaultBranch,
+        inputs: {
+          horizon_ref: $("ref").value.trim() || "main",
+          platform,
+          profile: $("profile").value,
+          upload_branch: uploadBranch,
+          override_revisions: useOverride,
+        },
+      }),
+    });
+    log("Build dispatched.", "ok");
+
+    // ---- find the run ----------------------------------------------------
+    const dispatchTime = new Date(Date.now() - 15000).toISOString();
+    run = null;
+    for (let attempt = 0; attempt < 10 && !run; attempt++) {
+      await sleep(attempt === 0 ? 4000 : 6000);
+      const runs = await gh(
+        `/repos/${slug}/actions/workflows/build.yml/runs?event=workflow_dispatch&per_page=10`);
+      run = (runs.workflow_runs || []).find(
+        (candidate) => candidate.created_at >= dispatchTime && candidate.head_branch === defaultBranch);
+    }
+    if (!run) throw new Error("Could not find the workflow run — open the Actions tab to check it manually.");
+    log(`Run #${run.run_number} started — ${run.html_url}`, "ok");
+    log("Polling the build… (first builds can take 1–2 hours)");
+
+    // ---- poll ------------------------------------------------------------
+    while (true) {
+      await sleep(15000);
+      const current = await gh(`/repos/${slug}/actions/runs/${run.id}`);
+      run = current;
+      if (current.status === "completed") break;
+      const minutes = Math.round((Date.now() - startedAt) / 60000);
+      log(`Status: ${current.status} (${minutes} min elapsed)`, "dim");
+    }
+
+    if (run.conclusion !== "success") {
+      throw new Error(`Build finished with "${run.conclusion}" — check the logs: ${run.html_url}`);
+    }
+
+    // ---- fetch artifact --------------------------------------------------
+    log("Build succeeded — fetching the artifact…", "ok");
+    const artifacts = await gh(`/repos/${slug}/actions/runs/${run.id}/artifacts`);
+    const artifact = (artifacts.artifacts || []).find((a) => a.name === artifactName);
+    if (!artifact) throw new Error(`Artifact ${artifactName} not found on the finished run.`);
+
+    const response = await fetch(`${API}/repos/${slug}/actions/artifacts/${artifact.id}/zip`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    if (!response.ok) throw new Error(`Artifact download failed: ${response.status} ${response.statusText}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+
+    const exe = platform === "windows-x64" ? "horizon-client.exe" : "horizon-client";
+    $("dlname").textContent = exe;
+    const expiresIn = Math.max(0, 60 - Math.round((Date.now() - new Date(artifact.created_at)) / 60000));
+    $("dlmeta").textContent =
+      `${artifactName}.zip (${fmtSize(blob.size)}) — auto-deleted in about ${expiresIn} min. ` +
+      `Unzip and replace the client in your Horizon game folder.`;
+    $("downloadbox").style.display = "block";
+    $("download").onclick = () => {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${artifactName}.zip`;
+      anchor.click();
+    };
+    log("Ready — download it below. It will be deleted in about an hour.", "ok");
+    if (hasMods) log("Cleanup removes the temporary mod branch (and the sweep catches strays).", "dim");
+  } catch (err) {
+    log(`Failed: ${err.message}`, "err");
+    if (err.status === 403) {
+      log("403 usually means the token lacks Actions:write / Contents:write on this repository, " +
+          "or Actions are disabled. For someone else's repo, fork it first and put owner/fork-name.", "warn");
+    }
+    if (err.status === 404) {
+      log("404 usually means the repository does not exist, is private without access, " +
+          "or the token cannot see it.", "warn");
+    }
+  } finally {
+    BUILDING = false;
+    $("build").disabled = false;
+  }
+}
+</script>
+</body>
+</html>
