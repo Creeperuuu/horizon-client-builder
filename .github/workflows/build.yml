@@ -39,7 +39,6 @@ permissions:
 
 env:
   HORIZON_MIXINS_REVISION: d9c83d7096b7ea5b83678da2efdfd6161f74997e
-  RUST_TOOLCHAIN: "1.95.0"
 
 jobs:
   build:
@@ -169,7 +168,7 @@ jobs:
           path: horizon-mixins
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@${{ env.RUST_TOOLCHAIN }}
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Restore Rust build caches
         id: cache
@@ -181,10 +180,10 @@ jobs:
             ~/.cargo/git
             game-target
             horizon-mixins/target
-          key: horizon-builder-${{ inputs.platform }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-${{ hashFiles('horizon/Cargo.lock', 'horizon-mixins/Cargo.lock') }}
+          key: horizon-builder-${{ inputs.platform }}-rust-1.95.0-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-${{ hashFiles('horizon/Cargo.lock', 'horizon-mixins/Cargo.lock') }}
           restore-keys: |
-            horizon-builder-${{ inputs.platform }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-
-            horizon-builder-${{ inputs.platform }}-rust-${{ env.RUST_TOOLCHAIN }}-
+            horizon-builder-${{ inputs.platform }}-rust-1.95.0-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-
+            horizon-builder-${{ inputs.platform }}-rust-1.95.0-
 
       # The revision workaround: mods compiled against other Horizon commits are
       # re-pinned to this build's commit so they no longer veto (or conflict
