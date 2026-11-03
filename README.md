@@ -17,8 +17,9 @@ browser (your token, memory only)
 GitHub Actions runner
   │  3. checks out Horizon (branch / tag / commit you picked)
   │  4. validates + unpacks the mods          (scripts/prepare_mods.py)
-  │  5. optionally re-pins every mod's [compatibility].horizon_revision
-  │     to this build's Horizon commit        (the revision workaround)
+  │  5. probes the requested Horizon commit and every mod's pinned commit
+  │     and builds at the first one where all mods still apply
+  │     (scripts/probe_revisions.sh — the revision workaround)
   │  6. plans + applies all mods, compiles the client
   │  7. uploads the horizon-client-<platform> artifact
   │  8. deletes the temporary upload branch
@@ -79,23 +80,32 @@ history is left untouched.
 ## The revision workaround
 
 Native mods pin an exact Horizon commit in their
-`[compatibility].horizon_revision`. Without help, mods compiled against
-different commits cannot be combined — the old strict behavior of this builder
-even failed the build when two uploaded mods disagreed.
+`[compatibility].horizon_revision`, and a mod only applies cleanly to the
+Horizon source it was written against — on newer commits its hook anchors may
+have been renamed or restructured (a free function turned into a method, and
+so on). Simply forcing every pin to the requested commit, like the first
+version of this builder did, therefore produced builds that failed in the
+mixin `plan` step with `E_TARGET_NOT_FOUND`.
 
-With **Override mod revisions** (on by default) `prepare_mods.py` rewrites every
-staged mod's pin to *this build's* Horizon commit before the mixin tooling runs:
+The builder now **probes** instead (`.github/workflows/build.yml` +
+`scripts/probe_revisions.sh`):
 
-- mixed-revision mods build together against one Horizon tree,
-- the Horizon source you asked for (branch/tag/commit) always wins over mod pins.
+1. collect the distinct pins of all selected mods,
+2. try the Horizon commit you requested first,
+3. then each pinned commit, newest first,
+4. at each candidate: check out Horizon there, neutralize the mods' pins and
+   run the mixin tooling's `plan`,
+5. the first candidate where *every* mod's source anchors resolve becomes the
+   build revision; the client is compiled against it.
 
-Whether the result is *actually* compatible is then decided by the mixin
-tooling itself: if a mod's injected source no longer matches Horizon's anchors,
-the build fails with a clear apply/compile error instead of silently producing
-a broken client.
+So mods written against different Horizon revisions build together with no
+settings, and a requested ref is honoured whenever it actually works. Genuinely
+incompatible mod sets fail the probe with a per-candidate report (run summary)
+listing exactly which anchors were missing where.
 
-Unchecked, the strict behavior applies: a single agreeing pin selects the
-Horizon commit, conflicting pins fail the build, and no manifest is modified.
+One Horizon source tree is still used per build — mods whose anchors only
+exist on mutually exclusive commits cannot be combined and must be built in
+separate runs.
 
 ## Limits & safety
 
@@ -121,7 +131,9 @@ Horizon commit, conflicting pins fail the build, and no manifest is modified.
 
 ```
 web/index.html                     the whole builder page (no build step, no deps)
-scripts/prepare_mods.py            .hnmod validation/unpacking + revision re-pinning
+scripts/prepare_mods.py            .hnmod validation/unpacking, pin listing, revision re-pinning
+scripts/probe_revisions.sh         mixed-revision workaround: probe pins, pick the working revision
+scripts/materialize-symlinks.sh    tracked-symlink materialization (reused after every probe switch)
 .github/workflows/build.yml        the dispatcher build (4 platforms, fast/release)
 .github/workflows/cleanup.yml      hourly retention sweep (artifacts / runs / branches)
 .github/workflows/deploy-pages.yml publishes web/ to GitHub Pages

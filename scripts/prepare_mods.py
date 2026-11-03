@@ -8,11 +8,13 @@ turns them into the directory layout the horizon-mixins `apply` tool expects:
     <output-dir>/<mod-id>/<...mod sources...>
 
 With --force-revision <sha>, every staged mod's `[compatibility].horizon_revision`
-is rewritten to <sha>. That is the workaround that lets mods compiled against
-different Horizon commits build together against one Horizon source tree:
-the manifest stops vetoing the checkout, and the actual compatibility risk
-(stale source anchors) is answered by whether the mixin tooling still applies
-the mod cleanly.
+is rewritten to <sha>. scripts/probe_revisions.sh uses that per candidate
+revision while probing: the build lands on the first Horizon commit where the
+mixin tooling still resolves every selected mod's source anchors, which is
+what lets mods written against different Horizon commits build together.
+
+With --list-pins, prints the distinct, validated pins of the staged mods as
+one compact JSON line ({"pins": [...], "count": N}) for the build workflow.
 """
 from __future__ import annotations
 
@@ -137,6 +139,28 @@ def stage(archive: Path, output: Path, seen: dict[str, str]) -> dict:
         }
 
 
+def list_pins(output: Path) -> int:
+    """Prints the distinct validated Horizon pins of the staged mods."""
+    pins: set[str] = set()
+    for manifest in sorted(output.glob("*/horizon-mixin.toml")):
+        try:
+            parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            print(f"Could not read {manifest}: {exc}", file=sys.stderr)
+            return 2
+        revision = parsed.get("compatibility", {}).get("horizon_revision")
+        if revision is None:
+            continue
+        if not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
+            print(f"Invalid [compatibility].horizon_revision in {manifest}: {revision!r}",
+                  file=sys.stderr)
+            return 2
+        pins.add(revision.lower())
+    print(json.dumps({"pins": sorted(pins), "count": len(pins)},
+                     separators=(",", ":")))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=False,
@@ -147,9 +171,14 @@ def main() -> int:
                         help="rewrite every mod's [compatibility].horizon_revision to this commit")
     parser.add_argument("--rewrite-staged", action="store_true",
                         help="skip unpacking; rewrite mods already staged in --output-dir")
+    parser.add_argument("--list-pins", action="store_true",
+                        help="print the staged mods' distinct Horizon pins as JSON and exit")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.list_pins:
+        return list_pins(args.output_dir)
 
     if args.rewrite_staged:
         manifests = sorted(args.output_dir.glob("*/horizon-mixin.toml"))

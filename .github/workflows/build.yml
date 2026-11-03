@@ -3,11 +3,16 @@ name: Build Horizon client
 # .hnmod native mods applied into the Horizon workspace first. Dispatched by the
 # builder website (web/) with the visitor's own token; the workflow itself only
 # ever uses the built-in GITHUB_TOKEN.
+#
+# Mixed-revision mods: instead of trusting (or forcing) the requested Horizon
+# ref, scripts/probe_revisions.sh tries the requested commit first and then
+# every mod's pinned commit (newest first), and the build lands on the first
+# revision where the mixin tooling still resolves every mod's source anchors.
 on:
   workflow_dispatch:
     inputs:
       horizon_ref:
-        description: "Horizon branch, tag, or commit SHA"
+        description: "Preferred Horizon branch, tag, or commit SHA"
         required: true
         type: string
         default: main
@@ -29,10 +34,10 @@ on:
         type: string
         default: ""
       override_revisions:
-        description: "Rewrite every mod's [compatibility].horizon_revision to this build's Horizon commit"
-        required: true
+        description: "(Deprecated and ignored - mod pins are probed automatically now)"
+        required: false
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -52,7 +57,6 @@ jobs:
       BUILD_PROFILE: ${{ inputs.profile || 'fast' }}
       BUILD_PLATFORM: ${{ inputs.platform || 'windows-x64' }}
       REQUESTED_HORIZON_REF: ${{ inputs.horizon_ref }}
-      OVERRIDE_REVISIONS: ${{ inputs.override_revisions }}
       UPLOAD_BRANCH: ${{ inputs.upload_branch }}
       RUSTFLAGS: ${{ inputs.platform == 'windows-x64' && '-C target-feature=+crt-static' || '' }}
     steps:
@@ -80,57 +84,30 @@ jobs:
         if: ${{ inputs.upload_branch != '' }}
         run: python scripts/prepare_mods.py --input-dir mods-upload/mods --output-dir mods
 
-      - name: Resolve the Horizon revision to build
-        id: resolve
+      - name: Collect the mods' pinned Horizon revisions
+        id: pins
+        if: ${{ inputs.upload_branch != '' }}
         run: |
-          python - <<'PY'
-          import os, re, tomllib
-          from pathlib import Path
+          PINS=$(python scripts/prepare_mods.py --list-pins --output-dir mods)
+          echo "Mod-pinned Horizon revisions: $PINS"
+          echo "pins_json=$PINS" >> "$GITHUB_OUTPUT"
 
-          requested = os.environ["REQUESTED_HORIZON_REF"].strip()
-          override = os.environ["OVERRIDE_REVISIONS"] == "true"
-
-          pinned = set()
-          if not override:
-              # Strict mode: mods keep their say. A single agreeing pin wins;
-              # disagreeing pins are exactly what the override exists for.
-              for manifest_path in sorted(Path("mods").glob("*/horizon-mixin.toml")):
-                  with manifest_path.open("rb") as stream:
-                      manifest = tomllib.load(stream)
-                  revision = manifest.get("compatibility", {}).get("horizon_revision")
-                  if revision:
-                      if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
-                          raise SystemExit(f"Invalid exact Horizon revision in {manifest_path}: {revision!r}")
-                      pinned.add(revision)
-              if len(pinned) > 1:
-                  raise SystemExit(
-                      "Selected mods pin different Horizon revisions ("
-                      + ", ".join(sorted(pinned))
-                      + "). Enable 'Override mod revisions' on the builder site to build them together."
-                  )
-
-          resolved = next(iter(pinned)) if pinned else requested
-          print(f"Resolved Horizon ref: {resolved} (requested: {requested}, override: {override})")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write("ref=" + resolved + "\n")
-          PY
-
-      - name: Checkout selected Horizon source
+      - name: Checkout the preferred Horizon source
         uses: actions/checkout@v4
         with:
           repository: horizon-rust/horizon
-          ref: ${{ steps.resolve.outputs.ref }}
+          ref: ${{ inputs.horizon_ref }}
           path: horizon
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Record resolved Horizon commit
+      - name: Record the requested Horizon commit
         id: horizon
         run: |
           REV=$(git -C horizon rev-parse HEAD)
           echo "revision=$REV" >> "$GITHUB_OUTPUT"
-          echo "Resolved Horizon commit: $REV"
-          echo "RESOLVED_HORIZON_REF=${{ steps.resolve.outputs.ref }}" >> "$GITHUB_ENV"
+          echo "Requested Horizon commit: $REV"
+          echo "FINAL_HORIZON_COMMIT=$REV" >> "$GITHUB_ENV"
 
       - name: Re-checkout Horizon files with LF endings
         run: |
@@ -139,14 +116,7 @@ jobs:
           git checkout-index --force --all
 
       - name: Materialize tracked Horizon symlinks
-        run: |
-          cd horizon
-          git ls-files -s | awk '$1 == 120000 {print $4}' | while IFS= read -r link; do
-            [ -n "$link" ] || continue
-            target=$(git cat-file blob "HEAD:$link")
-            rm -f "$link"
-            cp -L "$target" "$link"
-          done
+        run: bash scripts/materialize-symlinks.sh horizon
 
       - name: Install Linux native build packages
         if: startsWith(inputs.platform, 'linux-')
@@ -185,32 +155,35 @@ jobs:
             horizon-builder-${{ inputs.platform }}-rust-1.95.0-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-
             horizon-builder-${{ inputs.platform }}-rust-1.95.0-
 
-      # The revision workaround: mods compiled against other Horizon commits are
-      # re-pinned to this build's commit so they no longer veto (or conflict
-      # with) the checkout. Whether the result actually applies is then decided
-      # by the mixin tooling, not by the manifest.
-      - name: Override mod revisions to this build's Horizon commit
-        if: ${{ inputs.upload_branch != '' && inputs.override_revisions }}
-        run: python scripts/prepare_mods.py --rewrite-staged --output-dir mods --force-revision "${{ steps.horizon.outputs.revision }}"
-
       - name: Fetch pinned build dependencies
         run: |
           cargo fetch --locked --manifest-path horizon-mixins/Cargo.toml
           cargo fetch --locked --manifest-path horizon/Cargo.toml
 
-      - name: Plan all selected native mods together
+      - name: Build the mixin planning CLI
         if: ${{ inputs.upload_branch != '' }}
         run: |
-          rm -rf target/mixins
-          mkdir -p target/mixins
-          cargo run --locked --manifest-path horizon-mixins/Cargo.toml -p horizon-mixins-cli -- \
-            plan --workspace horizon --mods mods --out target/mixins/plan.json
+          cargo build --locked --manifest-path horizon-mixins/Cargo.toml -p horizon-mixins-cli
+          if [ -f horizon-mixins/target/debug/horizon-mixins.exe ]; then
+            echo "MIXINS_BIN=horizon-mixins/target/debug/horizon-mixins.exe" >> "$GITHUB_ENV"
+          else
+            echo "MIXINS_BIN=horizon-mixins/target/debug/horizon-mixins" >> "$GITHUB_ENV"
+          fi
+
+      # The revision workaround: probe the requested commit first, then each
+      # mod's pinned commit (newest first) until `plan` resolves every mod's
+      # source anchors. Genuinely incompatible mods fail here with a report
+      # instead of producing a broken client later.
+      - name: Plan mods while probing mod-pinned revisions
+        if: ${{ inputs.upload_branch != '' }}
+        env:
+          PINS_JSON: ${{ steps.pins.outputs.pins_json }}
+        run: bash scripts/probe_revisions.sh
 
       - name: Apply all selected native mods
         if: ${{ inputs.upload_branch != '' }}
         run: |
-          cargo run --locked --manifest-path horizon-mixins/Cargo.toml -p horizon-mixins-cli -- \
-            apply --workspace horizon --mods mods --out game-stage
+          "$MIXINS_BIN" apply --workspace horizon --mods mods --out game-stage
 
       - name: Select build workspace
         id: workspace
@@ -268,10 +241,15 @@ jobs:
             echo "Platform: $BUILD_PLATFORM"
             echo "Build profile: $BUILD_PROFILE"
             echo "Requested Horizon ref: $REQUESTED_HORIZON_REF"
-            echo "Resolved Horizon ref: $RESOLVED_HORIZON_REF"
-            echo "Horizon commit: ${{ steps.horizon.outputs.revision }}"
-            echo "Revision override: $OVERRIDE_REVISIONS"
+            echo "Resolved Horizon commit: $FINAL_HORIZON_COMMIT"
             echo "Builder commit: $GITHUB_SHA"
+            echo
+            echo "Revision probe:"
+            if [ -n "${PROBE_REPORT:-}" ]; then
+              printf '%s\n' "$PROBE_REPORT"
+            else
+              echo "Not needed (clean client, or the requested revision already matched)."
+            fi
             echo
             echo "Included .hnmod files:"
             if [ -f target/mixins/plan.json ]; then
@@ -299,10 +277,16 @@ jobs:
             echo "- Platform: $BUILD_PLATFORM"
             echo "- Profile: $BUILD_PROFILE"
             echo "- Requested Horizon ref: $REQUESTED_HORIZON_REF"
-            echo "- Resolved Horizon ref: $RESOLVED_HORIZON_REF"
-            echo "- Resolved Horizon commit: ${{ steps.horizon.outputs.revision }}"
-            echo "- Revision override: $OVERRIDE_REVISIONS"
+            echo "- Resolved Horizon commit: ${FINAL_HORIZON_COMMIT:-unknown}"
             echo "- Artifact: \`horizon-client-${{ inputs.platform }}\` (deleted about an hour after the build)"
+            if [ -n "${PROBE_REPORT:-}" ]; then
+              echo
+              echo "### Revision probe"
+              echo
+              echo '```'
+              printf '%s\n' "$PROBE_REPORT"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   cleanup-upload:
