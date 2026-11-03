@@ -131,7 +131,7 @@
 
     <div class="row3">
       <div>
-        <label for="ref">Horizon source <small>branch / tag / commit — mods' own pins are probed as fallbacks</small></label>
+        <label for="ref">Preferred Horizon source <small>branch / tag / commit — used when mods carry no pin</small></label>
         <input type="text" id="ref" value="main" spellcheck="false">
       </div>
       <div>
@@ -154,9 +154,9 @@
 
     <p class="hint" style="margin-top:14px">
       <b>Mixed-revision mods:</b> every .hnmod pins the Horizon commit it was written for. The builder
-      tries your preferred source first, then each mod's pin (newest commit first), and builds at the
-      first commit where all mods' hooks still apply — mods written for different Horizon revisions
-      are combined automatically, no settings needed.
+      probes each mod's pin (newest commit first), then your preferred source as the last candidate, and
+      builds at the first commit where all mods' hooks still apply — mods written for different Horizon
+      revisions are combined automatically, no settings needed.
     </p>
   </div>
 
@@ -196,8 +196,8 @@
           abandoned upload branches after <b>6 hours</b>. Download promptly.</li>
         <li><b>Mods:</b> up to 10 .hnmod files, 40 MiB each. All mods are applied together into one build —
           duplicate mod IDs or conflicting hooks fail the build. Mods pinning different Horizon revisions
-          are reconciled automatically: the workflow probes the requested commit and every mod's pin and
-          builds at the first revision where all mods' hooks still apply.</li>
+          are reconciled automatically: the workflow probes each mod's pinned commit (newest first), then
+          the requested source, and builds at the first revision where all mods' hooks still apply.</li>
         <li><b>First build per platform is slow</b> (cold cargo cache, ~1–2 h); repeat builds with the same
           Horizon commit reuse the cache and are much quicker.</li>
         <li><b>Privacy:</b> no analytics, no server of its own — this is a static page; every request goes

@@ -175,8 +175,8 @@ jobs:
             echo "MIXINS_BIN=horizon-mixins/target/debug/horizon-mixins" >> "$GITHUB_ENV"
           fi
 
-      # The revision workaround: probe the requested commit first, then each
-      # mod's pinned commit (newest first) until `plan` resolves every mod's
+      # The revision workaround: probe each mod's pinned commit first (newest
+      # first), then the requested commit, until `plan` resolves every mod's
       # source anchors. Genuinely incompatible mods fail here with a report
       # instead of producing a broken client later.
       - name: Plan mods while probing mod-pinned revisions
@@ -201,13 +201,13 @@ jobs:
 
       - name: Build Horizon client (fast)
         if: ${{ inputs.profile != 'release' }}
-        run: cargo build --profile fast --locked -p horizon-client --bin horizon-client \
-          --manifest-path "${{ steps.workspace.outputs.manifest }}" --target-dir game-target
+        run: |
+          cargo build --profile fast --locked -p horizon-client --bin horizon-client --manifest-path "${{ steps.workspace.outputs.manifest }}" --target-dir game-target
 
       - name: Build Horizon client (release)
         if: ${{ inputs.profile == 'release' }}
-        run: cargo build --release --locked -p horizon-client --bin horizon-client \
-          --manifest-path "${{ steps.workspace.outputs.manifest }}" --target-dir game-target
+        run: |
+          cargo build --release --locked -p horizon-client --bin horizon-client --manifest-path "${{ steps.workspace.outputs.manifest }}" --target-dir game-target
 
       - name: Set executable filename
         id: output

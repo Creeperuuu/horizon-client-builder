@@ -17,9 +17,9 @@ browser (your token, memory only)
 GitHub Actions runner
   │  3. checks out Horizon (branch / tag / commit you picked)
   │  4. validates + unpacks the mods          (scripts/prepare_mods.py)
-  │  5. probes the requested Horizon commit and every mod's pinned commit
-  │     and builds at the first one where all mods still apply
-  │     (scripts/probe_revisions.sh — the revision workaround)
+  │  5. probes each mod's pinned Horizon commit (newest first), then the
+  │     requested one, and builds at the first revision where all mods
+  │     still apply                          (scripts/probe_revisions.sh)
   │  6. plans + applies all mods, compiles the client
   │  7. uploads the horizon-client-<platform> artifact
   │  8. deletes the temporary upload branch
@@ -91,17 +91,21 @@ The builder now **probes** instead (`.github/workflows/build.yml` +
 `scripts/probe_revisions.sh`):
 
 1. collect the distinct pins of all selected mods,
-2. try the Horizon commit you requested first,
-3. then each pinned commit, newest first,
+2. try each pinned commit, newest first — the pins are the commits the mods
+   were actually written for, so they are the strongest compatibility signal,
+3. then the Horizon commit you requested, as the last candidate,
 4. at each candidate: check out Horizon there, neutralize the mods' pins and
    run the mixin tooling's `plan`,
 5. the first candidate where *every* mod's source anchors resolve becomes the
    build revision; the client is compiled against it.
 
 So mods written against different Horizon revisions build together with no
-settings, and a requested ref is honoured whenever it actually works. Genuinely
-incompatible mod sets fail the probe with a per-candidate report (run summary)
-listing exactly which anchors were missing where.
+settings, and they are built against the revision they were written for. With
+no pinned mods the requested ref is used directly; with pinned mods it is
+tried last, so it still wins whenever the mods also apply there — but a pin
+that only works on its own commit takes precedence. Genuinely incompatible
+mod sets fail the probe with a per-candidate report (run summary) listing
+exactly which anchors were missing where.
 
 One Horizon source tree is still used per build — mods whose anchors only
 exist on mutually exclusive commits cannot be combined and must be built in

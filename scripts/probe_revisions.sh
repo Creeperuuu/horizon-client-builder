@@ -9,14 +9,15 @@
 # "override" workaround - silences (a) but cannot fix (b), which is what
 # actually broke builds of mods written for older Horizon commits.
 #
-# This script instead PROBES candidate revisions: the requested commit first,
-# then every distinct mod pin, newest commit first. For each candidate it
-# checks out the Horizon worktree at that commit, neutralizes the mods' pins
-# (so E_REVISION cannot mask the anchor errors being probed for) and runs
-# `plan`. The first candidate whose plan succeeds - i.e. where every selected
-# mod's anchors still resolve - becomes the build revision. If no candidate
-# works, a per-candidate report is written to the run summary and the build
-# fails, so genuinely incompatible mods fail loudly instead of silently.
+# This script instead PROBES candidate revisions: every distinct mod pin,
+# newest commit first, then the requested commit as a fallback. For each
+# candidate it checks out the Horizon worktree at that commit, neutralizes the
+# mods' pins (so E_REVISION cannot mask the anchor errors being probed for)
+# and runs `plan`. The first candidate whose plan succeeds - i.e. where every
+# selected mod's anchors still resolve - becomes the build revision. If no
+# candidate works, a per-candidate report is written to the run summary and
+# the build fails, so genuinely incompatible mods fail loudly instead of
+# silently.
 #
 # Required environment:
 #   FINAL_HORIZON_COMMIT  commit the Horizon worktree is currently at (the
@@ -47,11 +48,11 @@ if ! ls mods/*/horizon-mixin.toml > /dev/null 2>&1; then
   exit 0
 fi
 
-CANDIDATES="$FINAL_HORIZON_COMMIT"
+CANDIDATES=""
 if [ -n "${PINS_JSON:-}" ] && printf '%s' "$PINS_JSON" | grep -q '"pins":\[[^]]'; then
   # Order the mod pins by commit date, newest first: a mod is most likely to
   # keep working on commits at or after the one it was written for.
-  PIN_ORDER=$(printf '%s' "$PINS_JSON" | python -c '
+  CANDIDATES=$(printf '%s' "$PINS_JSON" | python -c '
 import json, subprocess, sys
 pins = sorted(set(json.load(sys.stdin).get("pins", [])))
 for pin in pins:
@@ -60,10 +61,12 @@ for pin in pins:
         capture_output=True, text=True)
     stamp = result.stdout.strip().split(" ")[0] if result.returncode == 0 else ""
     print(stamp if stamp.isdigit() else "0", pin)
-' | sort -rn | awk '{print $2}')
-  CANDIDATES="$CANDIDATES $PIN_ORDER"
+' | sort -k1,1rn -k2,2 | awk '{print $2}')
 fi
-# Deduplicate, keeping the requested commit first.
+# The requested commit is the last-resort candidate; with no pins it is the
+# only one.
+CANDIDATES="$CANDIDATES $FINAL_HORIZON_COMMIT"
+# Deduplicate, keeping the probe order.
 CANDIDATES=$(printf '%s\n' $CANDIDATES | awk '!seen[$0]++')
 echo "Probing Horizon revisions in order: $(echo $CANDIDATES | tr '\n' ' ')"
 
@@ -110,7 +113,7 @@ if [ -z "$WINNER" ]; then
   {
     echo "## No Horizon revision satisfies all selected mods"
     echo
-    echo "Probed candidates (requested ref first, then mod pins, newest first):"
+    echo "Probed candidates (mod pins newest first, then the requested ref):"
     echo
     echo '```'
     cat "$REPORT"
