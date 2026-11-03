@@ -107,9 +107,26 @@ that only works on its own commit takes precedence. Genuinely incompatible
 mod sets fail the probe with a per-candidate report (run summary) listing
 exactly which anchors were missing where.
 
-One Horizon source tree is still used per build — mods whose anchors only
+One Horizon source tree is still used per build - mods whose anchors only
 exist on mutually exclusive commits cannot be combined and must be built in
 separate runs.
+
+## The Windows toolchain shim
+
+Mods also vendor C code, and a mod built on Linux/macOS usually compiles it
+with GCC/Clang assumptions. The common case is opus's `-DVAR_ARRAYS` mode,
+which implements its stack allocations as C99 variable-length arrays - cl.exe
+cannot compile those, and the first Windows mod build failed with exactly
+that (`C2057`/`C2466`/`C2133` in `opus_decoder.c`).
+
+Before cargo builds a Windows client, `scripts/patch_native_compat.py`
+rewrites the staged native crates' build scripts from those definitions to
+the portable equivalents opus itself uses on Windows (`VAR_ARRAYS` ->
+`USE_ALLOCA`, i.e. stack allocas - same semantics, supported by MSVC, GCC
+and Clang alike). The patch is source-level, idempotent, limited to
+`game-stage/native-crates/**/build.rs`, and every change is reported in the
+build log, the run summary and `build-info.txt`. C sources are never
+touched, and non-Windows builds are left exactly as the mod ships them.
 
 ## Limits & safety
 
@@ -137,6 +154,7 @@ separate runs.
 web/index.html                     the whole builder page (no build step, no deps)
 scripts/prepare_mods.py            .hnmod validation/unpacking, pin listing, revision re-pinning
 scripts/probe_revisions.sh         mixed-revision workaround: probe pins, pick the working revision
+scripts/patch_native_compat.py     Windows shim: VAR_ARRAYS -> USE_ALLOCA in mod crate build scripts
 scripts/materialize-symlinks.sh    tracked-symlink materialization (reused after every probe switch)
 .github/workflows/build.yml        the dispatcher build (4 platforms, fast/release)
 .github/workflows/cleanup.yml      hourly retention sweep (artifacts / runs / branches)

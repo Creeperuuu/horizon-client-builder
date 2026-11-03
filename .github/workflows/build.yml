@@ -190,6 +190,15 @@ jobs:
         run: |
           "$MIXINS_BIN" apply --workspace horizon --mods mods --out game-stage
 
+      # Mods that vendor C code are usually built with GCC/Clang flags, and
+      # MSVC rejects the most common one (opus's -DVAR_ARRAYS enables C99
+      # variable-length arrays, which cl.exe cannot compile). Rewrite the
+      # staged crates' build scripts to the portable alloca mode before
+      # cargo sees them.
+      - name: Shim MSVC-incompatible mod crate build scripts
+        if: ${{ startsWith(inputs.platform, 'windows-') && inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
+        run: python scripts/patch_native_compat.py --stage game-stage --target x86_64-pc-windows-msvc
+
       - name: Select build workspace
         id: workspace
         run: |
@@ -256,6 +265,13 @@ jobs:
               echo "Not needed (clean client, or the requested revision already matched)."
             fi
             echo
+            echo "Native-crate toolchain shims:"
+            if [ -n "${COMPAT_PATCH_REPORT:-}" ]; then
+              printf '%s\n' "$COMPAT_PATCH_REPORT"
+            else
+              echo "None (clean client, non-Windows target, or nothing to shim)."
+            fi
+            echo
             echo "Included .hnmod files:"
             if [ -f target/mixins/plan.json ]; then
               python -c 'import json; print(json.dumps(json.load(open("target/mixins/plan.json")), indent=2))'
@@ -290,6 +306,14 @@ jobs:
               echo
               echo '```'
               printf '%s\n' "$PROBE_REPORT"
+              echo '```'
+            fi
+            if [ -n "${COMPAT_PATCH_REPORT:-}" ]; then
+              echo
+              echo "### Native-crate toolchain shims"
+              echo
+              echo '```json'
+              printf '%s\n' "$COMPAT_PATCH_REPORT"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
