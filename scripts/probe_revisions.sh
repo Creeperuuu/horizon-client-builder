@@ -40,6 +40,13 @@ REPORT=probe-report.txt
 : > "$REPORT"
 mkdir -p probe-logs
 
+# Defensive: an upload branch with zero staged mods means a clean client
+# build - nothing to probe (the workflow skips this step for that case too).
+if ! ls mods/*/horizon-mixin.toml > /dev/null 2>&1; then
+  echo "No staged mods - skipping the revision probe (clean client build)"
+  exit 0
+fi
+
 CANDIDATES="$FINAL_HORIZON_COMMIT"
 if [ -n "${PINS_JSON:-}" ] && printf '%s' "$PINS_JSON" | grep -q '"pins":\[[^]]'; then
   # Order the mod pins by commit date, newest first: a mod is most likely to

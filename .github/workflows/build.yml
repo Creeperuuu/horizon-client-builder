@@ -81,12 +81,17 @@ jobs:
           persist-credentials: false
 
       - name: Validate and unpack uploaded .hnmod files
+        id: mods
         if: ${{ inputs.upload_branch != '' }}
-        run: python scripts/prepare_mods.py --input-dir mods-upload/mods --output-dir mods
+        run: |
+          OUT=$(python scripts/prepare_mods.py --input-dir mods-upload/mods --output-dir mods)
+          echo "$OUT"
+          COUNT=$(printf '%s' "$OUT" | python -c 'import json,sys; print(json.load(sys.stdin)["count"])')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Collect the mods' pinned Horizon revisions
         id: pins
-        if: ${{ inputs.upload_branch != '' }}
+        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
         run: |
           PINS=$(python scripts/prepare_mods.py --list-pins --output-dir mods)
           echo "Mod-pinned Horizon revisions: $PINS"
@@ -161,7 +166,7 @@ jobs:
           cargo fetch --locked --manifest-path horizon/Cargo.toml
 
       - name: Build the mixin planning CLI
-        if: ${{ inputs.upload_branch != '' }}
+        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
         run: |
           cargo build --locked --manifest-path horizon-mixins/Cargo.toml -p horizon-mixins-cli
           if [ -f horizon-mixins/target/debug/horizon-mixins.exe ]; then
@@ -175,13 +180,13 @@ jobs:
       # source anchors. Genuinely incompatible mods fail here with a report
       # instead of producing a broken client later.
       - name: Plan mods while probing mod-pinned revisions
-        if: ${{ inputs.upload_branch != '' }}
+        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
         env:
           PINS_JSON: ${{ steps.pins.outputs.pins_json }}
         run: bash scripts/probe_revisions.sh
 
       - name: Apply all selected native mods
-        if: ${{ inputs.upload_branch != '' }}
+        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
         run: |
           "$MIXINS_BIN" apply --workspace horizon --mods mods --out game-stage
 
