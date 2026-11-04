@@ -111,6 +111,19 @@ One Horizon source tree is still used per build - mods whose anchors only
 exist on mutually exclusive commits cannot be combined and must be built in
 separate runs.
 
+When no candidate plans the full set, the probe does not just stop at the
+first error (mods are evaluated alphabetically, so one loud mod can mask the
+rest). It keeps planning per candidate with the blocking mods excluded -
+attributing every failure to a mod via the error's `mod_id`, or, for
+mod-less errors like `E_MODULE`, to the mods whose module section declares
+the missing destination file - and records a per-candidate compatibility
+matrix. The run summary then shows, for every candidate: which mods plan
+cleanly there, which mod blocks and why, a **suggested split** into groups
+that each build on their own revision, and any mod that fails everywhere
+(its own pin included) so it can be fixed. Plan runs spent on this analysis
+are capped (default 40, `MATRIX_PLAN_BUDGET`); they only ever happen on the
+failure path.
+
 ## The Windows toolchain shim
 
 Mods also vendor C code, and a mod built on Linux/macOS usually compiles it
