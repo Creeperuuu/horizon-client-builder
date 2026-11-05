@@ -380,9 +380,8 @@ lines.append("## No Horizon revision satisfies all selected mods together")
 lines.append("")
 lines.append("The probe tried every mod's pinned commit (newest first), then the requested")
 lines.append("ref. No single revision plans all of them, so they cannot be built into one")
-lines.append("client as-is. Compatibility per candidate (`✔` = plans cleanly there):")
-lines.append("")
-lines.append("| Horizon revision | ✔ plans | ✘ blocks |")
+lines.append("Compatibility per candidate (PASS = plans cleanly there):")
+lines.append("| Horizon revision | PASS | BLOCKS |")
 lines.append("|---|---|---|")
 for r in rows:
     label = r.get("label") or ""
@@ -410,7 +409,7 @@ if groups:
     labels = {r["sha"]: r.get("label") or "" for r in rows}
     for i, (mods, sha) in enumerate(groups, 1):
         label = labels.get(sha, "")
-        lines.append(f"{i}. {', '.join(sorted(mods))} → Horizon `{sha[:12]}`" + (f" {label}" if label else ""))
+        lines.append(f"{i}. {', '.join(sorted(mods))} -> Horizon `{sha[:12]}`" + (f" {label}" if label else ""))
     if remaining:
         lines.append("")
         lines.append(f"No candidate plans {', '.join(sorted(remaining))}: these mods fail")
