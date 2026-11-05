@@ -9,22 +9,15 @@
 # "override" workaround - silences (a) but cannot fix (b), which is what
 # actually broke builds of mods written for older Horizon commits.
 #
-# This script instead PROBES candidate revisions: every distinct mod pin,
-# newest commit first, then the requested commit as a fallback. For each
-# candidate it checks out the Horizon worktree at that commit, neutralizes the
-# mods' pins (so E_REVISION cannot mask the anchor errors being probed for)
-# and runs `plan`. The first candidate whose plan succeeds - i.e. where every
-# selected mod's source anchors still resolve - becomes the build revision.
+# The workflow selects exactly one Horizon revision before restoring the Rust
+# build cache: the only pin when mods agree, or the newest distinct mod pin by
+# commit timestamp when they differ. The requested ref is used only when no mod
+# pins a Horizon revision. Mixed pins require an explicit user opt-in.
 #
-# When NO candidate plans the full set, the mods cannot be built together on
-# one Horizon tree. The probe then keeps going instead of stopping at the
-# first error: for every candidate it re-plans with the blocking mods excluded
-# (attributing each failure to a mod via the error's mod_id, or - for
-# mod-less errors like E_MODULE - to every mod whose [[module]] declares the
-# missing destination file) and records a per-candidate compatibility matrix.
-# The run summary ends with that matrix plus a suggested way to split the mods
-# into groups that each build on their own revision, and names mods that fail
-# everywhere (their own pin included) explicitly.
+# This script checks out that already-selected revision, rewrites staged mod
+# pins to it (so E_REVISION cannot mask missing source anchors), and runs one
+# `plan`. It never probes every pin. A missing target still fails with the
+# mixin diagnostic; choosing Build anyway does not invent missing source hooks.
 #
 # Required environment:
 #   FINAL_HORIZON_COMMIT  commit the Horizon worktree is currently at (the
@@ -291,27 +284,11 @@ json.dump(rows, open("probe-matrix.json", "w"))
 PY
 }
 
-CANDIDATES=""
-if [ -n "${PINS_JSON:-}" ] && printf '%s' "$PINS_JSON" | grep -q '"pins":\[[^]]'; then
-  # Order the mod pins by commit date, newest first: a mod is most likely to
-  # keep working on commits at or after the one it was written for.
-  CANDIDATES=$(printf '%s' "$PINS_JSON" | python3 -c '
-import json, subprocess, sys
-pins = sorted(set(json.load(sys.stdin).get("pins", [])))
-for pin in pins:
-    result = subprocess.run(
-        ["git", "-C", "horizon", "rev-list", "-n", "1", "--timestamp", pin],
-        capture_output=True, text=True)
-    stamp = result.stdout.strip().split(" ")[0] if result.returncode == 0 else ""
-    print(stamp if stamp.isdigit() else "0", pin)
-' | sort -k1,1rn -k2,2 | awk '{print $2}')
-fi
-# The requested commit is the last-resort candidate; with no pins it is the
-# only one.
-CANDIDATES="$FINAL_HORIZON_COMMIT $CANDIDATES"
-# Deduplicate, keeping the probe order.
-CANDIDATES=$(printf '%s\n' $CANDIDATES | awk '!seen[$0]++')
-echo "Probing Horizon revisions in order: $(echo $CANDIDATES | tr '\n' ' ')"
+# The selected revision is resolved once before the cache restore. Keep this
+# validation to one Horizon tree; probing every pin repeats source analysis and
+# defeats the launcher-style newest-pin behavior.
+CANDIDATES="$FINAL_HORIZON_COMMIT"
+echo "Planning mods at selected Horizon revision: $CANDIDATES"
 
 WINNER=""
 FAILED_SHAS=""
@@ -378,9 +355,9 @@ all_mods = sorted({m for r in rows for m in r["good"] + r["bad"]})
 lines = []
 lines.append("## No Horizon revision satisfies all selected mods together")
 lines.append("")
-lines.append("The probe tried every mod's pinned commit (newest first), then the requested")
-lines.append("ref. No single revision plans all of them, so they cannot be built into one")
-lines.append("Compatibility per candidate (PASS = plans cleanly there):")
+lines.append("The selected revision (newest mod pin, or requested ref when there are no pins)")
+lines.append("failed to plan all selected mods. Other revisions were not tested.")
+lines.append("Compatibility at the selected revision (PASS = plans cleanly):")
 lines.append("| Horizon revision | PASS | BLOCKS |")
 lines.append("|---|---|---|")
 for r in rows:

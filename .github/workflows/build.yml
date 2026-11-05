@@ -4,10 +4,9 @@ name: Build Horizon client
 # builder website (web/) with the visitor's own token; the workflow itself only
 # ever uses the built-in GITHUB_TOKEN.
 #
-# Mixed-revision mods: instead of trusting (or forcing) the requested Horizon
-# ref, scripts/probe_revisions.sh tries the requested commit first and then
-# every mod's pinned commit (newest first), and the build lands on the first
-# revision where the mixin tooling still resolves every mod's source anchors.
+# Mixed-revision mods: when pins differ, the user must opt in. The workflow
+# selects the newest pinned Horizon commit once, validates it, and restores the
+# Rust build cache for that resolved revision; it never probes every pin.
 on:
   workflow_dispatch:
     inputs:
@@ -33,6 +32,11 @@ on:
         required: false
         type: string
         default: ""
+      allow_mixed_revisions:
+        description: "Allow trying the newest pinned revision when selected mods pin different commits"
+        required: false
+        type: boolean
+        default: false
       override_revisions:
         description: "(Deprecated and ignored - mod pins are probed automatically now)"
         required: false
@@ -97,6 +101,13 @@ jobs:
           echo "Mod-pinned Horizon revisions: $PINS"
           echo "pins_json=$PINS" >> "$GITHUB_OUTPUT"
 
+      - name: Require opt-in for mixed mod revisions
+        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
+        env:
+          PINS_JSON: ${{ steps.pins.outputs.pins_json }}
+          ALLOW_MIXED_REVISIONS: ${{ inputs.allow_mixed_revisions }}
+        run: python scripts/select_horizon_revision.py --check-only
+
       - name: Checkout the preferred Horizon source
         uses: actions/checkout@v4
         with:
@@ -106,13 +117,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Record the requested Horizon commit
+      - name: Select the Horizon revision for the mods
         id: horizon
-        run: |
-          REV=$(git -C horizon rev-parse HEAD)
-          echo "revision=$REV" >> "$GITHUB_OUTPUT"
-          echo "Requested Horizon commit: $REV"
-          echo "FINAL_HORIZON_COMMIT=$REV" >> "$GITHUB_ENV"
+        env:
+          PINS_JSON: ${{ steps.pins.outputs.pins_json }}
+          ALLOW_MIXED_REVISIONS: ${{ inputs.allow_mixed_revisions }}
+        run: python scripts/select_horizon_revision.py --workspace horizon
 
       - name: Re-checkout Horizon files with LF endings
         run: |
@@ -175,14 +185,11 @@ jobs:
             echo "MIXINS_BIN=horizon-mixins/target/debug/horizon-mixins" >> "$GITHUB_ENV"
           fi
 
-      # The revision workaround: probe each mod's pinned commit first (newest
-      # first), then the requested commit, until `plan` resolves every mod's
-      # source anchors. Genuinely incompatible mods fail here with a report
-      # instead of producing a broken client later.
-      - name: Plan mods while probing mod-pinned revisions
+      # The selected revision is already reflected in the cache key. Validate
+      # that one tree once; missing source anchors still fail before the build.
+      - name: Plan mods on the selected Horizon revision
         if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
         env:
-          PINS_JSON: ${{ steps.pins.outputs.pins_json }}
           MATRIX_PLAN_BUDGET: "0"
         run: bash scripts/probe_revisions.sh
 
