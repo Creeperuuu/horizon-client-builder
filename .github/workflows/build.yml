@@ -183,6 +183,7 @@ jobs:
         if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
         env:
           PINS_JSON: ${{ steps.pins.outputs.pins_json }}
+          MATRIX_PLAN_BUDGET: "0"
         run: bash scripts/probe_revisions.sh
 
       - name: Apply all selected native mods
