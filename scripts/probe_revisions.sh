@@ -308,7 +308,7 @@ for pin in pins:
 fi
 # The requested commit is the last-resort candidate; with no pins it is the
 # only one.
-CANDIDATES="$CANDIDATES $FINAL_HORIZON_COMMIT"
+CANDIDATES="$FINAL_HORIZON_COMMIT $CANDIDATES"
 # Deduplicate, keeping the probe order.
 CANDIDATES=$(printf '%s\n' $CANDIDATES | awk '!seen[$0]++')
 echo "Probing Horizon revisions in order: $(echo $CANDIDATES | tr '\n' ' ')"
