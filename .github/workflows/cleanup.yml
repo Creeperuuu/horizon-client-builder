@@ -1,0 +1,38 @@
+name: Daily storage cleanup
+
+on:
+  schedule:
+    - cron: "17 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Remove workflow runs and releases older than 24 hours
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d '24 hours ago' +%s)"
+
+          gh run list -R "$GITHUB_REPOSITORY" --limit 1000 --json databaseId,createdAt |
+            jq -r --argjson cutoff "$cutoff" '.[] | select((.createdAt | fromdateiso8601) < $cutoff) | .databaseId' |
+            while read -r run; do
+              [ -n "$run" ] || continue
+              echo "Deleting workflow run $run"
+              gh run delete "$run" -R "$GITHUB_REPOSITORY" || true
+            done
+
+          gh release list -R "$GITHUB_REPOSITORY" --limit 1000 --json tagName,createdAt |
+            jq -r --argjson cutoff "$cutoff" '.[] | select((.createdAt | fromdateiso8601) < $cutoff) | .tagName' |
+            while read -r tag; do
+              [ -n "$tag" ] || continue
+              echo "Deleting release $tag"
+              gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
+            done
