@@ -107,7 +107,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Restore Cargo dependencies and compiled targets before either build.
+      - name: Configure bundled Opus for MSVC\n        run: python builder/scripts/fix_msvc_opus.py\n\n      # Restore Cargo dependencies and compiled targets before either build.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: horizon
