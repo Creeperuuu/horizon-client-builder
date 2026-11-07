@@ -32,6 +32,11 @@ on:
         type: choice
         options: [release, fast]
         default: release
+      mods_tag:
+        description: "Temporary upload release tag containing .hnmod files (leave empty for vanilla)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -94,6 +99,29 @@ jobs:
 
       - name: Horizon's source at the pinned commit
         run: python builder/scripts/fetch_source.py "$SHA" horizon
+
+      - name: Download and validate selected native mods
+        if: inputs.mods_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODS_TAG: ${{ inputs.mods_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p builder/mod-uploads
+          gh release download "$MODS_TAG" -R "$GITHUB_REPOSITORY" -D builder/mod-uploads -p '*.hnmod'
+          python builder/scripts/prepare_mods.py extract builder/mod-uploads builder/prepared-mods
+
+      - name: Apply native mods using Horizon's revision rules
+        if: inputs.mods_tag != ''
+        run: |
+          set -euo pipefail
+          python builder/scripts/prepare_mods.py stage \
+            --mods builder/prepared-mods --requested "$SHA" \
+            --horizon-root horizon --fetch-source builder/scripts/fetch_source.py \
+            --mixins-cache builder/mixins-cache --out builder/mod-build
+          rm -rf horizon
+          cp -a builder/mod-build/modded horizon
+          cat builder/mod-build/chosen.json >> "$GITHUB_STEP_SUMMARY"
 
       - uses: dtolnay/rust-toolchain@stable
 
