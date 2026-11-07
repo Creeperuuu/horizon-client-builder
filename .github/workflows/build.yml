@@ -116,7 +116,7 @@ jobs:
           mkdir -p builder/mod-uploads
           git -C builder fetch --depth=1 origin "$MODS_BRANCH"
           git -C builder archive FETCH_HEAD .hnmod-uploads | tar -x -C builder/mod-uploads
-          find builder/mod-uploads -type f -name '*.hnmod' -exec cp {} builder/mod-uploads/ \\;
+          find builder/mod-uploads -type f -name '*.hnmod' -exec cp {} builder/mod-uploads/ \;
           python builder/scripts/prepare_mods.py extract builder/mod-uploads builder/prepared-mods
 
       - name: Apply native mods using Horizon's revision rules
