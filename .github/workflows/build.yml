@@ -100,6 +100,8 @@ jobs:
       - name: Horizon's source at the pinned commit
         run: python builder/scripts/fetch_source.py "$SHA" horizon
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Download and validate selected native mods
         if: inputs.mods_tag != ''
         env:
@@ -123,7 +125,6 @@ jobs:
           cp -a builder/mod-build/modded horizon
           cat builder/mod-build/chosen.json >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
