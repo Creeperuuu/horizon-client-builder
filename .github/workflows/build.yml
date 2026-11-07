@@ -37,6 +37,11 @@ on:
         type: string
         required: false
         default: ""
+      mods_branch:
+        description: "Temporary upload branch created by the website"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -103,18 +108,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Download and validate selected native mods
-        if: inputs.mods_tag != ''
+        if: inputs.mods_branch != ''
         env:
-          GH_TOKEN: ${{ github.token }}
-          MODS_TAG: ${{ inputs.mods_tag }}
+          MODS_BRANCH: ${{ inputs.mods_branch }}
         run: |
           set -euo pipefail
           mkdir -p builder/mod-uploads
-          gh release download "$MODS_TAG" -R "$GITHUB_REPOSITORY" -D builder/mod-uploads -p '*.hnmod'
+          git -C builder fetch --depth=1 origin "$MODS_BRANCH"
+          git -C builder archive FETCH_HEAD .hnmod-uploads | tar -x -C builder/mod-uploads
+          find builder/mod-uploads -type f -name '*.hnmod' -exec cp {} builder/mod-uploads/ \\;
           python builder/scripts/prepare_mods.py extract builder/mod-uploads builder/prepared-mods
 
       - name: Apply native mods using Horizon's revision rules
-        if: inputs.mods_tag != ''
+        if: inputs.mods_branch != ''
         run: |
           set -euo pipefail
           python builder/scripts/prepare_mods.py stage \
