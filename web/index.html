@@ -196,24 +196,35 @@ $("go").addEventListener("click", async () => {
   $("go").disabled = true; say("Starting…");
   try {
     let modsTag = "";
+    let modsBranch = "";
     const selected = [...$("mods").files];
     if (selected.length) {
       if (selected.some(f => !f.name.toLowerCase().endsWith(".hnmod"))) throw new Error("Only .hnmod files are accepted.");
       if (selected.length > 10 || selected.some(f => f.size > 40 * 1024 * 1024) || selected.reduce((n, f) => n + f.size, 0) > 200 * 1024 * 1024) throw new Error("Upload limit: 10 mods, 40 MiB each, 200 MiB total.");
-      say("Uploading native mods…");
+      if (selected.some(f => !/^[a-zA-Z0-9._-]+$/.test(f.name)) || new Set(selected.map(f => f.name)).size !== selected.length) throw new Error("Mod filenames may only contain letters, numbers, dots, underscores and hyphens; filenames must be unique.");
+      say("Preparing temporary upload branch…");
       const tag = "hnmod-upload-" + crypto.randomUUID();
-      const created = await api(`/repos/${OWNER}/${REPO}/releases`, { method: "POST", auth: true, body: JSON.stringify({ tag_name: tag, name: "Temporary native mod upload", draft: true, prerelease: true }) });
-      if (!created.ok) throw new Error("Could not create temporary mod upload: " + created.status);
-      const release = await created.json();
+      const base = await api(`/repos/${OWNER}/${REPO}/git/ref/heads/main`, { auth: true });
+      if (!base.ok) throw new Error("Could not read main branch (" + base.status + "): " + (await base.text()));
+      const baseData = await base.json();
+      const branchRes = await api(`/repos/${OWNER}/${REPO}/git/refs`, { method: "POST", auth: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref: "refs/heads/" + tag, sha: baseData.object.sha }) });
+      if (!branchRes.ok) throw new Error("Could not create temporary upload branch (" + branchRes.status + "): " + (await branchRes.text()));
       for (const file of selected) {
-        const uploaded = await fetch(release.upload_url.split("{")[0] + "?name=" + encodeURIComponent(file.name), { method: "POST", headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "Content-Type": "application/zip" }, body: file });
-        if (!uploaded.ok) throw new Error("Upload failed for " + file.name + " (" + uploaded.status + ").");
+        say("Uploading " + file.name + "…");
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        const chunk = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += chunk) binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunk, bytes.length)));
+        const encoded = btoa(binary);
+        const uploaded = await api(`/repos/${OWNER}/${REPO}/contents/.hnmod-uploads/${tag}/${encodeURIComponent(file.name)}`, { method: "PUT", auth: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "Upload temporary native mod bundle", content: encoded, branch: tag }) });
+        if (!uploaded.ok) throw new Error("Upload failed for " + file.name + " (" + uploaded.status + "): " + (await uploaded.text()));
       }
       modsTag = tag;
+      modsBranch = tag;
     }
     const res = await api(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/dispatches`, {
       method: "POST", auth: true,
-      body: JSON.stringify({ ref: "main", inputs: { revision: rev, profile: $("profile").value, mods_tag: modsTag } }),
+      body: JSON.stringify({ ref: "main", inputs: { revision: rev, profile: $("profile").value, mods_tag: modsTag, mods_branch: modsBranch } }),
     });
     if (res.status === 204) { say("Build started. It shows under Builds in a moment; a release build takes a while.", "ok"); setTimeout(refresh, 4000); }
     else if (res.status === 401) say("GitHub rejected the token.", "err");
