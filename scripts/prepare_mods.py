@@ -152,18 +152,20 @@ def mixins_revision(horizon_tree):
 
 
 def build_cli(revision, root):
+    # Keep the Cargo target directory stable across workflow runs so rust-cache can persist it.
     dest = pathlib.Path(root) / revision
-    binary = dest / "target" / "release" / ("horizon-mixins.exe" if os.name == "nt" else "horizon-mixins")
+    target_dir = pathlib.Path(root).parent / "mixins-cache-target"
+    binary = target_dir / "release" / ("horizon-mixins.exe" if os.name == "nt" else "horizon-mixins")
     if binary.is_file():
         return binary
     shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "clone", "--filter=blob:none", MIXINS_REPO, str(dest)], check=True)
     subprocess.run(["git", "-C", str(dest), "checkout", "--detach", revision], check=True)
-    subprocess.run(["cargo", "build", "--locked", "--release", "-p", "horizon-mixins-cli"], cwd=dest, check=True)
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(target_dir.resolve())
+    subprocess.run(["cargo", "build", "--locked", "--release", "-p", "horizon-mixins-cli"], cwd=dest, env=env, check=True)
     return binary
-
-
 def stage(args):
     mods_dir = pathlib.Path(args.mods)
     records = json.loads((mods_dir / "mods.json").read_text())
