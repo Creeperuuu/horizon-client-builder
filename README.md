@@ -8,7 +8,7 @@ download button.
 
 ## Using it
 
-Open the site, pick a revision and a profile, paste a token and press **Start build**. When it finishes
+Open the site, pick a revision and a profile, optionally select one or more `.hnmod` files, paste a fine-grained token and press **Start build**. When it finishes
 the build appears in the list; downloading needs no token. You can also start one from the Actions tab or
 the CLI:
 
@@ -18,7 +18,7 @@ gh workflow run build.yml -f revision=2026-11-05-f319701 -f profile=fast
 ```
 
 The token is only for *starting* a build. Use a fine-grained token limited to this repository with
-**Actions: read and write**. The page keeps it in the tab's memory and sends it nowhere but api.github.com.
+**Actions: read and write**, and **Contents: read and write** (the site creates a temporary draft release to upload the selected `.hnmod` archives). The page keeps it in the tab's memory and sends it nowhere but api.github.com.
 
 ## Revisions
 
@@ -54,6 +54,19 @@ Copied from Horizon's `game-build.yml` and the launcher's `native_mods.rs`:
 
 Each build is a pre-release named `horizon-client-<short>-<profile>` with `horizon-client.exe` and
 `SHA256SUMS`. The newest 25 are kept.
+
+
+## Native `.hnmod` bundles
+
+Select one or more `.hnmod` files in the site before starting the build. The site uploads them to a temporary draft release, then dispatches the workflow with that release tag. The Windows runner downloads and validates the archives, extracts each `horizon-native.json` and `mixins/<id>/horizon-mixin.toml`, and applies the bundles with Horizon's `horizon-mixins` CLI before compiling `horizon-client.exe`.
+
+The builder checks archive paths and sizes, rejects duplicate mod IDs and inconsistent Horizon pins, and stages mods together. It selects a Horizon revision from the mods' pinned commits (newest first), uses the newest pinned `horizon-mixins` commit, and reports a failure if the bundles cannot be applied together. A native mod is executable native code, not sandboxed. Only upload mods you trust.
+
+Limits: 10 mods per build, 40 MiB per archive, 200 MiB total. The fine-grained token must have Actions and Contents read/write access to this repository.
+
+## Storage cleanup
+
+`.github/workflows/cleanup.yml` runs daily and deletes workflow runs and releases older than 24 hours. Build artifacts already have a one-day retention period. The cleanup can also be started manually from Actions.
 
 ## Playing a build
 
