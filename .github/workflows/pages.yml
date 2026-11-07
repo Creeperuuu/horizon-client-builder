@@ -1,8 +1,11 @@
-name: Deploy builder website
+name: pages
+
+# Publishes web/ as the site. It is static: the page lists this repo's builds from the public API and
+# starts a build with a token you paste into it (kept in the tab's memory only).
 on:
   push:
     branches: [main]
-    paths: ["web/**", ".github/workflows/deploy-pages.yml"]
+    paths: [web/**, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:
@@ -16,8 +19,8 @@ concurrency:
 
 jobs:
   deploy:
-    name: Publish the builder site to GitHub Pages
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -25,11 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # enablement: true flips Settings → Pages to "GitHub Actions" the first
-      # time this workflow runs, so no manual setup is needed.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web

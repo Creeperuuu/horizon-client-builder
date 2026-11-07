@@ -1,346 +1,192 @@
-name: Build Horizon client
-# Compiles horizon-client for one desktop platform, optionally with source-based
-# .hnmod native mods applied into the Horizon workspace first. Dispatched by the
-# builder website (web/) with the visitor's own token; the workflow itself only
-# ever uses the built-in GITHUB_TOKEN.
+name: build horizon-client
+run-name: build horizon-client @ ${{ inputs.revision }} (${{ inputs.profile }})
+
+# Builds horizon-client.exe from horizon-rust/horizon at the revision you pick and publishes it as a
+# release of this repo, which the Pages site lists with a download button.
 #
-# Mixed-revision mods: when pins differ, the user must opt in. The workflow
-# selects the newest pinned Horizon commit once, validates it, and restores the
-# Rust build cache for that resolved revision; it never probes every pin.
+# It builds the way Horizon's own CI (game-build.yml) and launcher (native_mods.rs) do:
+#   - the source is fetched by exact commit from codeload.github.com, links left out, the commit in
+#     .horizon-revision (scripts/fetch_source.py); a Nightly's commit stays downloadable for good as the
+#     tag nightly-source/<date>-<short>, so any Nightly can be rebuilt later
+#   - HORIZON_VERSION / HORIZON_NIGHTLY are stamped in, as Horizon's CI does: no version-bump commits
+#   - `cargo build --locked -p horizon-client --bin horizon-client`, the Windows C runtime linked in
+#     (`-C target-feature=+crt-static`), so it runs without the Visual C++ redistributable
+#   - checked afterwards with Horizon's own tools/check_imports.py and by starting the program
+#
+# Like Horizon's untrusted nightly build, `build` holds no secrets and only reads contents: what it compiles
+# is somebody's commit. `publish` is the only job that can write, and it never executes what `build` made.
+#
+#   gh workflow run build.yml -f revision=nightly
+#   gh workflow run build.yml -f revision=2026-11-05-f319701 -f profile=fast
+
 on:
   workflow_dispatch:
     inputs:
-      horizon_ref:
-        description: "Preferred Horizon branch, tag, or commit SHA"
-        required: true
+      revision:
+        description: "nightly (newest), main, a Nightly (2026-11-05-f319701), a release tag, a branch or a commit"
         type: string
-        default: main
-      platform:
-        description: "Target platform"
+        default: nightly
         required: true
-        type: choice
-        options: [windows-x64, linux-x64, linux-arm64, macos-arm64]
-        default: windows-x64
       profile:
-        description: "Cargo build profile"
-        required: true
+        description: "release: what Horizon ships (thin LTO, slow to build). fast: the launcher's default for native builds (no LTO, much quicker)."
         type: choice
-        options: [fast, release]
-        default: fast
-      upload_branch:
-        description: "Temporary branch holding the uploaded .hnmod files (empty = no mods)"
-        required: false
-        type: string
-        default: ""
-      allow_mixed_revisions:
-        description: "Allow trying the newest pinned revision when selected mods pin different commits"
-        required: false
-        type: boolean
-        default: false
-      override_revisions:
-        description: "(Deprecated and ignored - mod pins are probed automatically now)"
-        required: false
-        type: boolean
-        default: false
+        options: [release, fast]
+        default: release
 
 permissions:
   contents: read
 
+concurrency:
+  # The same revision and profile never build twice at once; a newer request waits its turn.
+  group: build-${{ inputs.revision }}-${{ inputs.profile }}
+  cancel-in-progress: false
+
 env:
-  HORIZON_MIXINS_REVISION: d9c83d7096b7ea5b83678da2efdfd6161f74997e
+  UPSTREAM: horizon-rust/horizon
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.r.outputs.sha }}
+      short: ${{ steps.r.outputs.short }}
+      kind: ${{ steps.r.outputs.kind }}
+      label: ${{ steps.r.outputs.label }}
+      version: ${{ steps.r.outputs.version }}
+      nightly: ${{ steps.r.outputs.nightly }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: r
+        name: Resolve the revision to one commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ inputs.revision }}
+        run: python3 scripts/resolve_revision.py "$REVISION" | tee -a "$GITHUB_STEP_SUMMARY"
+
   build:
-    name: ${{ inputs.platform }} / ${{ inputs.profile }}
-    runs-on: ${{ inputs.platform == 'windows-x64' && 'windows-latest' || inputs.platform == 'linux-x64' && 'ubuntu-latest' || inputs.platform == 'linux-arm64' && 'ubuntu-24.04-arm' || 'macos-14' }}
-    timeout-minutes: 240
+    needs: resolve
+    name: build (windows x64, ${{ inputs.profile }})
+    runs-on: windows-latest
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
     env:
-      BUILD_PROFILE: ${{ inputs.profile || 'fast' }}
-      BUILD_PLATFORM: ${{ inputs.platform || 'windows-x64' }}
-      REQUESTED_HORIZON_REF: ${{ inputs.horizon_ref }}
-      UPLOAD_BRANCH: ${{ inputs.upload_branch }}
-      RUSTFLAGS: ${{ inputs.platform == 'windows-x64' && '-C target-feature=+crt-static' || '' }}
+      # The C runtime linked in, so the game runs without the Visual C++ redistributable (game-build.yml).
+      RUSTFLAGS: -C target-feature=+crt-static
+      # What the game says it is (horizon_core::release). Empty for a branch or a commit: a build from source.
+      HORIZON_VERSION: ${{ needs.resolve.outputs.version }}
+      HORIZON_NIGHTLY: ${{ needs.resolve.outputs.nightly }}
+      # A hosted runner builds each revision once: incremental compilation only costs disk here.
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+      PROFILE: ${{ inputs.profile }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      LABEL: ${{ needs.resolve.outputs.label }}
     steps:
-      - name: Checkout builder scripts
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
+          path: builder
           persist-credentials: false
 
-      - name: Preserve LF line endings
-        run: git config --global core.autocrlf false
+      - name: Horizon's source at the pinned commit
+        run: python builder/scripts/fetch_source.py "$SHA" horizon
 
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: "3.12"
+          workspaces: horizon
+          # Revisions share dependencies, so one cache serves them all; only Horizon's own crates rebuild.
+          shared-key: windows-${{ inputs.profile }}
+          cache-on-failure: true
 
-      - name: Download uploaded .hnmod files
-        if: ${{ inputs.upload_branch != '' }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.upload_branch }}
-          path: mods-upload
-          persist-credentials: false
-
-      - name: Validate and unpack uploaded .hnmod files
-        id: mods
-        if: ${{ inputs.upload_branch != '' }}
+      - name: Build horizon-client
+        working-directory: horizon
         run: |
-          OUT=$(python scripts/prepare_mods.py --input-dir mods-upload/mods --output-dir mods)
-          echo "$OUT"
-          COUNT=$(printf '%s' "$OUT" | python -c 'import json,sys; print(json.load(sys.stdin)["count"])')
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          rustc --version --verbose
+          cargo build --locked --profile "$PROFILE" -p horizon-client --bin horizon-client
 
-      - name: Collect the mods' pinned Horizon revisions
-        id: pins
-        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
+      - name: Check the program
+        working-directory: horizon
         run: |
-          PINS=$(python scripts/prepare_mods.py --list-pins --output-dir mods)
-          echo "Mod-pinned Horizon revisions: $PINS"
-          echo "pins_json=$PINS" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          exe="target/$PROFILE/horizon-client.exe"
+          test -f "$exe" || { echo "::error::$exe was not built"; exit 1; }
+          # Horizon's own check that the .exe needs no DLL a player's Windows lacks.
+          if [ -f tools/check_imports.py ]; then python tools/check_imports.py "$exe"; fi
+          if [ -f tools/check_pe_arch.py ]; then python tools/check_pe_arch.py x64 "$exe"; fi
+          "$exe" --help | grep -q -- '--resources'
+          ls -l "$exe"
 
-      - name: Require opt-in for mixed mod revisions
-        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
-        env:
-          PINS_JSON: ${{ steps.pins.outputs.pins_json }}
-          ALLOW_MIXED_REVISIONS: ${{ inputs.allow_mixed_revisions }}
-        run: python scripts/select_horizon_revision.py --check-only
-
-      - name: Checkout the preferred Horizon source
-        uses: actions/checkout@v4
-        with:
-          repository: horizon-rust/horizon
-          ref: ${{ inputs.horizon_ref }}
-          path: horizon
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Select the Horizon revision for the mods
-        id: horizon
-        env:
-          PINS_JSON: ${{ steps.pins.outputs.pins_json }}
-          ALLOW_MIXED_REVISIONS: ${{ inputs.allow_mixed_revisions }}
-        run: python scripts/select_horizon_revision.py --workspace horizon
-
-      - name: Re-checkout Horizon files with LF endings
+      - name: Collect
         run: |
-          cd horizon
-          git config core.autocrlf false
-          git checkout-index --force --all
-
-      - name: Materialize tracked Horizon symlinks
-        run: bash scripts/materialize-symlinks.sh horizon
-
-      - name: Install Linux native build packages
-        if: startsWith(inputs.platform, 'linux-')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libasound2-dev libudev-dev
-
-      - name: Install macOS native build tools
-        if: startsWith(inputs.platform, 'macos-')
-        run: |
-          brew update
-          brew install pkg-config
-
-      - name: Checkout horizon-mixins tooling
-        uses: actions/checkout@v4
-        with:
-          repository: horizon-rust/horizon-mixins
-          ref: ${{ env.HORIZON_MIXINS_REVISION }}
-          path: horizon-mixins
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@1.95.0
-
-      - name: Restore Rust build caches
-        id: cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/index
-            ~/.cargo/git
-            game-target
-            horizon-mixins/target
-          key: horizon-builder-${{ inputs.platform }}-rust-1.95.0-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-${{ hashFiles('horizon/Cargo.lock', 'horizon-mixins/Cargo.lock') }}
-          restore-keys: |
-            horizon-builder-${{ inputs.platform }}-rust-1.95.0-${{ inputs.profile }}-${{ steps.horizon.outputs.revision }}-
-            horizon-builder-${{ inputs.platform }}-rust-1.95.0-
-
-      - name: Fetch pinned build dependencies
-        run: |
-          cargo fetch --locked --manifest-path horizon-mixins/Cargo.toml
-          cargo fetch --locked --manifest-path horizon/Cargo.toml
-
-      - name: Build the mixin planning CLI
-        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
-        run: |
-          cargo build --locked --manifest-path horizon-mixins/Cargo.toml -p horizon-mixins-cli
-          if [ -f horizon-mixins/target/debug/horizon-mixins.exe ]; then
-            echo "MIXINS_BIN=horizon-mixins/target/debug/horizon-mixins.exe" >> "$GITHUB_ENV"
-          else
-            echo "MIXINS_BIN=horizon-mixins/target/debug/horizon-mixins" >> "$GITHUB_ENV"
-          fi
-
-      # The selected revision is already reflected in the cache key. Validate
-      # that one tree once; missing source anchors still fail before the build.
-      - name: Plan mods on the selected Horizon revision
-        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
-        env:
-          MATRIX_PLAN_BUDGET: "0"
-        run: bash scripts/probe_revisions.sh
-
-      - name: Apply all selected native mods
-        if: ${{ inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
-        run: |
-          "$MIXINS_BIN" apply --workspace horizon --mods mods --out game-stage
-
-      # Mods that vendor C code are usually built with GCC/Clang flags, and
-      # MSVC rejects the most common one (opus's -DVAR_ARRAYS enables C99
-      # variable-length arrays, which cl.exe cannot compile). Rewrite the
-      # staged crates' build scripts to the portable alloca mode before
-      # cargo sees them.
-      - name: Shim MSVC-incompatible mod crate build scripts
-        if: ${{ startsWith(inputs.platform, 'windows-') && inputs.upload_branch != '' && steps.mods.outputs.count != '0' }}
-        run: python scripts/patch_native_compat.py --stage game-stage --target x86_64-pc-windows-msvc
-
-      - name: Select build workspace
-        id: workspace
-        run: |
-          if [ -f game-stage/Cargo.toml ]; then
-            echo "manifest=game-stage/Cargo.toml" >> "$GITHUB_OUTPUT"
-          else
-            echo "manifest=horizon/Cargo.toml" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build Horizon client (fast)
-        if: ${{ inputs.profile != 'release' }}
-        run: |
-          cargo build --profile fast --locked -p horizon-client --bin horizon-client --manifest-path "${{ steps.workspace.outputs.manifest }}" --target-dir game-target
-
-      - name: Build Horizon client (release)
-        if: ${{ inputs.profile == 'release' }}
-        run: |
-          cargo build --release --locked -p horizon-client --bin horizon-client --manifest-path "${{ steps.workspace.outputs.manifest }}" --target-dir game-target
-
-      - name: Set executable filename
-        id: output
-        run: |
-          if [ "$BUILD_PLATFORM" = "windows-x64" ]; then
-            echo "filename=horizon-client.exe" >> "$GITHUB_OUTPUT"
-          else
-            echo "filename=horizon-client" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Verify executable
-        run: |
-          BIN="game-target/$BUILD_PROFILE/${{ steps.output.outputs.filename }}"
-          test -f "$BIN"
-          chmod +x "$BIN"
-          "$BIN" --help | grep -q -- '--resources'
-
-      - name: Save Rust build caches
-        if: always() && steps.cache.outputs.cache-primary-key != ''
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/index
-            ~/.cargo/git
-            game-target
-            horizon-mixins/target
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-
-      - name: Stage build outputs
-        run: |
-          mkdir -p publish
-          cp "game-target/$BUILD_PROFILE/${{ steps.output.outputs.filename }}" "publish/${{ steps.output.outputs.filename }}"
+          set -euo pipefail
+          mkdir dist
+          cp "horizon/target/$PROFILE/horizon-client.exe" dist/horizon-client.exe
+          (cd dist && sha256sum horizon-client.exe > SHA256SUMS && cat SHA256SUMS)
           {
-            echo "Horizon Client Builder"
-            echo "Platform: $BUILD_PLATFORM"
-            echo "Build profile: $BUILD_PROFILE"
-            echo "Requested Horizon ref: $REQUESTED_HORIZON_REF"
-            echo "Resolved Horizon commit: $FINAL_HORIZON_COMMIT"
-            echo "Builder commit: $GITHUB_SHA"
-            echo
-            echo "Revision probe:"
-            if [ -n "${PROBE_REPORT:-}" ]; then
-              printf '%s\n' "$PROBE_REPORT"
-            else
-              echo "Not needed (clean client, or the requested revision already matched)."
-            fi
-            echo
-            echo "Native-crate toolchain shims:"
-            if [ -n "${COMPAT_PATCH_REPORT:-}" ]; then
-              printf '%s\n' "$COMPAT_PATCH_REPORT"
-            else
-              echo "None (clean client, non-Windows target, or nothing to shim)."
-            fi
-            echo
-            echo "Included .hnmod files:"
-            if [ -f target/mixins/plan.json ]; then
-              python -c 'import json; print(json.dumps(json.load(open("target/mixins/plan.json")), indent=2))'
-            else
-              echo "None (clean client)"
-            fi
-          } > publish/build-info.txt
-
-      - name: Upload client artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: horizon-client-${{ inputs.platform }}
-          path: publish/*
-          if-no-files-found: error
-          # Hard floor is one day; the scheduled cleanup deletes builder
-          # artifacts one hour after they are created.
-          retention-days: 1
-
-      - name: Build summary
-        if: always()
-        run: |
-          {
-            echo "## Horizon Client Builder"
-            echo "- Platform: $BUILD_PLATFORM"
-            echo "- Profile: $BUILD_PROFILE"
-            echo "- Requested Horizon ref: $REQUESTED_HORIZON_REF"
-            echo "- Resolved Horizon commit: ${FINAL_HORIZON_COMMIT:-unknown}"
-            echo "- Artifact: \`horizon-client-${{ inputs.platform }}\` (deleted about an hour after the build)"
-            if [ -n "${PROBE_REPORT:-}" ]; then
-              echo
-              echo "### Revision probe"
-              echo
-              echo '```'
-              printf '%s\n' "$PROBE_REPORT"
-              echo '```'
-            fi
-            if [ -n "${COMPAT_PATCH_REPORT:-}" ]; then
-              echo
-              echo "### Native-crate toolchain shims"
-              echo
-              echo '```json'
-              printf '%s\n' "$COMPAT_PATCH_REPORT"
-              echo '```'
-            fi
+            echo "### horizon-client.exe"
+            echo "- revision: \`$LABEL\` (\`$SHA\`)"
+            echo "- profile: \`$PROFILE\`, size: $(du -h dist/horizon-client.exe | cut -f1)"
+            echo "- version stamp: \`${HORIZON_VERSION:-none}\`, nightly stamp: \`${HORIZON_NIGHTLY:-none}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  cleanup-upload:
-    name: Delete temporary mod-upload branch
-    if: ${{ always() && inputs.upload_branch != '' }}
-    needs: [build]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-client
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: write # the release: the only job that writes
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROFILE: ${{ inputs.profile }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      SHORT: ${{ needs.resolve.outputs.short }}
+      LABEL: ${{ needs.resolve.outputs.label }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      NIGHTLY: ${{ needs.resolve.outputs.nightly }}
+      KEEP: "25"
     steps:
-      - name: Delete temporary branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          UPLOAD_BRANCH: ${{ inputs.upload_branch }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: horizon-client
+          path: dist
+
+      - name: Publish the release
         run: |
-          case "$UPLOAD_BRANCH" in
-            builder-upload-*) gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$UPLOAD_BRANCH" && echo "Deleted $UPLOAD_BRANCH" || echo "Could not delete $UPLOAD_BRANCH (the scheduled cleanup will catch it)" ;;
-            *) echo "Not deleting unexpected branch name: $UPLOAD_BRANCH" ;;
-          esac
+          set -euo pipefail
+          tag="horizon-client-$SHORT-$PROFILE"
+          {
+            printf '**horizon-client.exe** for Windows x64, built from [`%s`](https://github.com/%s/commit/%s).\n\n' "$SHORT" "$UPSTREAM" "$SHA"
+            printf -- '- Revision: %s\n- Profile: `%s`\n' "$LABEL" "$PROFILE"
+            printf -- '- Version stamp: `%s`, nightly stamp: `%s`\n' "${VERSION:-none}" "${NIGHTLY:-none}"
+            printf -- '- Built by [run %s](%s/%s/actions/runs/%s)\n\n' "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Unsigned. Check it against `SHA256SUMS`. To play it, import it in the Horizon launcher (Versions, import a build): the program alone needs a version folder'"'"'s game files.\n'
+          } > notes.md
+          # Building the same revision and profile again replaces its release.
+          gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh release create "$tag" dist/horizon-client.exe dist/SHA256SUMS \
+            -R "$GITHUB_REPOSITORY" --prerelease \
+            --title "$LABEL ($PROFILE)" --notes-file notes.md
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep only the newest builds
+        run: |
+          set -euo pipefail
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq "[.[] | select(.tagName | startswith(\"horizon-client-\"))] | sort_by(.createdAt) | reverse | .[$KEEP:] | .[].tagName" |
+            while read -r old; do
+              echo "Removing $old"
+              gh release delete "$old" --cleanup-tag --yes -R "$GITHUB_REPOSITORY"
+            done
