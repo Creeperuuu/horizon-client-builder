@@ -40,10 +40,18 @@ def commit_date(revision):
         fail(f"Could not resolve commit date for {revision}: GitHub HTTP {error.code}")
 
 
-def date_key(revision):
-    data = json.loads(commit_date(revision))
-    return data["commit"]["committer"]["date"]
-
+def date_key(revision, repository=UPSTREAM):
+    url = f"https://api.github.com/repos/{repository}/commits/{revision}"
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "horizon-client-builder"})
+    token = os.environ.get("GH_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    import urllib.error
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response)["commit"]["committer"]["date"]
+    except urllib.error.HTTPError as error:
+        fail(f"Could not resolve {repository} commit {revision}: GitHub HTTP {error.code}")
 
 def safe_extract(archive, destination):
     total = 0
@@ -157,7 +165,7 @@ def stage(args):
         tree = pathlib.Path(args.horizon_root)
         subprocess.run([sys.executable, args.fetch_source, revision, str(tree)], check=True)
         mixins_candidates = {mixins_revision(tree), *(m["mixins"] for m in records)}
-        mixins_rev = max(mixins_candidates, key=date_key)
+        mixins_rev = max(mixins_candidates, key=lambda rev: date_key(rev, "horizon-rust/horizon-mixins"))
         cli = build_cli(mixins_rev, args.mixins_cache)
         candidate_mods = pathlib.Path(args.out) / revision
         shutil.rmtree(candidate_mods, ignore_errors=True)
