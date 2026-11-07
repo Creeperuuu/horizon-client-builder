@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -32,7 +33,6 @@ def commit_date(revision):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     import datetime
-    import urllib.error
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             return response.read().decode()
@@ -46,7 +46,6 @@ def date_key(revision, repository=UPSTREAM):
     token = os.environ.get("GH_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
-    import urllib.error
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             return json.load(response)["commit"]["committer"]["date"]
