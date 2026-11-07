@@ -156,8 +156,6 @@ def build_cli(revision, root):
     dest = pathlib.Path(root) / revision
     target_dir = pathlib.Path(root).parent / "mixins-cache-target"
     binary = target_dir / "release" / ("horizon-mixins.exe" if os.name == "nt" else "horizon-mixins")
-    if binary.is_file():
-        return binary
     shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "clone", "--filter=blob:none", MIXINS_REPO, str(dest)], check=True)
