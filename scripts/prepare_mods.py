@@ -155,9 +155,16 @@ def stage(args):
     mods_dir = pathlib.Path(args.mods)
     records = json.loads((mods_dir / "mods.json").read_text())
     requested = args.requested
+    hook_mods = [m for m in records if m["hooks"] > 0]
+    pinned_mods = [m for m in records if m["hooks"] == 0]
     candidates = sorted({m["horizon"] for m in records}, key=date_key, reverse=True)
-    if requested and requested not in candidates:
-        candidates.append(requested)
+    # Hook-only mods can target the selected build when its append-only hook API is new enough.
+    if requested and hook_mods and not pinned_mods:
+        hooks_file = pathlib.Path(args.horizon_root) / "crates/horizon-client/src/game/native_hooks.rs"
+        match = re.search(r"pub\\(crate\\) const NATIVE_HOOKS_API: u32 = (\\d+);", hooks_file.read_text(encoding="utf-8"))
+        available = int(match.group(1)) if match else -1
+        if available >= max(m["hooks"] for m in hook_mods):
+            candidates = [requested]
     if not candidates:
         candidates = [requested]
     errors = []
