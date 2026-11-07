@@ -108,7 +108,21 @@ def extract(args):
             fail(f"{archive.name}: invalid Horizon revision pin")
         if not re.fullmatch(r"[0-9a-f]{40}", meta.get("mixins", "")):
             fail(f"{archive.name}: invalid horizon-mixins revision pin")
-        if not isinstance(meta.get("hooks"), int) or meta["hooks"] < 0:
+        raw_hooks = meta.get("hooks", 0)
+        # "hooks" is optional: its absence means this bundle pins the exact
+        # Horizon commit above. Accept numeric strings too, since some
+        # third-party packagers serialize this JSON field as text.
+        if raw_hooks is None:
+            hooks = 0
+        elif isinstance(raw_hooks, bool):
+            fail(f"{archive.name}: invalid hooks API version")
+        elif isinstance(raw_hooks, int):
+            hooks = raw_hooks
+        elif isinstance(raw_hooks, str) and raw_hooks.isdecimal():
+            hooks = int(raw_hooks)
+        else:
+            fail(f"{archive.name}: invalid hooks API version")
+        if hooks < 0:
             fail(f"{archive.name}: invalid hooks API version")
         if mod_id in [r["id"] for r in records]:
             fail(f"Duplicate mod ID: {mod_id}")
@@ -120,7 +134,7 @@ def extract(args):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(bundle, target)
         records.append({"id": mod_id, "version": meta.get("version", "unknown"),
-                        "horizon": meta["horizon"], "mixins": meta["mixins"], "hooks": meta["hooks"]})
+                        "horizon": meta["horizon"], "mixins": meta["mixins"], "hooks": hooks})
         total += archive.stat().st_size
         shutil.rmtree(temp)
     if total > MAX_TOTAL:
@@ -161,7 +175,7 @@ def stage(args):
     # Hook-only mods can target the selected build when its append-only hook API is new enough.
     if requested and hook_mods and not pinned_mods:
         hooks_file = pathlib.Path(args.horizon_root) / "crates/horizon-client/src/game/native_hooks.rs"
-        match = re.search(r"pub\\(crate\\) const NATIVE_HOOKS_API: u32 = (\\d+);", hooks_file.read_text(encoding="utf-8"))
+        match = re.search(r"pub\(crate\) const NATIVE_HOOKS_API: u32 = (\d+);", hooks_file.read_text(encoding="utf-8"))
         available = int(match.group(1)) if match else -1
         if available >= max(m["hooks"] for m in hook_mods):
             candidates = [requested]
