@@ -177,8 +177,6 @@ def stage(args):
             manifest = dst / "horizon-mixin.toml"
             text = manifest.read_text(encoding="utf-8")
             text = re.sub(r'(horizon_revision\s*=\s*")[0-9a-f]{40}(")', rf'\g<1>{revision}\2', text)
-            # [api] is launcher metadata, not part of the horizon-mixins CLI schema.
-            text = re.sub(r'(?ms)^\[api\]\s*.*?(?=^\[|\Z)', '', text)
             manifest.write_text(text, encoding="utf-8")
         base = ["--workspace", str(tree), "--mods", str(candidate_mods)]
         plan = subprocess.run([str(cli), "plan", *base, "--out", str(pathlib.Path(args.out) / "plan.json")],
