@@ -107,6 +107,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Restore Cargo dependencies and compiled targets before either build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: horizon
+          cache-directories: builder/mixins-cache-target
+          shared-key: windows-${{ inputs.profile }}
+          cache-on-failure: true
+
       - name: Download and validate selected native mods
         if: inputs.mods_branch != ''
         env:
@@ -131,13 +139,6 @@ jobs:
           cp -a builder/mod-build/modded horizon
           cat builder/mod-build/chosen.json >> "$GITHUB_STEP_SUMMARY"
 
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: horizon
-          # Revisions share dependencies, so one cache serves them all; only Horizon's own crates rebuild.
-          shared-key: windows-${{ inputs.profile }}
-          cache-on-failure: true
 
       - name: Build horizon-client
         working-directory: horizon
