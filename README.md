@@ -58,11 +58,11 @@ Each build is a pre-release named `horizon-client-<short>-<profile>` with `horiz
 
 ## Native `.hnmod` bundles
 
-Select one or more `.hnmod` files in the site before starting the build. The site uploads them to a temporary draft release, then dispatches the workflow with that release tag. The Windows runner downloads and validates the archives, extracts each `horizon-native.json` and `mixins/<id>/horizon-mixin.toml`, and applies the bundles with Horizon's `horizon-mixins` CLI before compiling `horizon-client.exe`.
+Select one or more `.hnmod` files in the site before starting the build. The site uploads them through GitHub's REST Contents API to a temporary `hnmod-upload-*` branch, then dispatches the workflow with that branch name. This avoids browser CORS failures on GitHub's separate release-asset upload host. The Windows runner fetches the temporary branch and validates the archives, extracts each `horizon-native.json` and `mixins/<id>/horizon-mixin.toml`, and applies the bundles with Horizon's `horizon-mixins` CLI before compiling `horizon-client.exe`.
 
 The builder checks archive paths and sizes, rejects duplicate mod IDs and inconsistent Horizon pins, and stages mods together. It selects a Horizon revision from the mods' pinned commits (newest first), uses the newest pinned `horizon-mixins` commit, and reports a failure if the bundles cannot be applied together. A native mod is executable native code, not sandboxed. Only upload mods you trust.
 
-Limits: 10 mods per build, 40 MiB per archive, 200 MiB total. The fine-grained token must have Actions and Contents read/write access to this repository.
+Limits: 10 mods per build, 40 MiB per archive, 200 MiB total. The fine-grained token must have Actions and Contents read/write access to this repository. Temporary upload branches are deleted by the daily cleanup workflow after 24 hours.
 
 ## Storage cleanup
 
