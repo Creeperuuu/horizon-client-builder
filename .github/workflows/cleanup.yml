@@ -36,3 +36,11 @@ jobs:
               echo "Deleting release $tag"
               gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
             done
+
+          gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" |
+            jq -r --argjson cutoff "$cutoff" '.[] | select(.name | startswith("hnmod-upload-")) | select((.commit.commit.committer.date | fromdateiso8601) < $cutoff) | .name' |
+            while read -r branch; do
+              [ -n "$branch" ] || continue
+              echo "Removing temporary upload branch $branch"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" || true
+            done
