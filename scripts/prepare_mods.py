@@ -158,7 +158,11 @@ def build_cli(revision, root):
     binary = target_dir / "release" / ("horizon-mixins.exe" if os.name == "nt" else "horizon-mixins")
     shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "--filter=blob:none", MIXINS_REPO, str(dest)], check=True)
+
+    subprocess.run(
+        ["git", "clone", "--filter=blob:none", MIXINS_REPO, str(dest)],
+        check=True
+    )
     subprocess.run(["git", "-C", str(dest), "checkout", "--detach", revision], check=True)
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(target_dir.resolve())
