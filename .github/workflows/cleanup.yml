@@ -37,10 +37,16 @@ jobs:
               gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
             done
 
-          gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" |
-            jq -r --argjson cutoff "$cutoff" '.[] | select(.name | startswith("hnmod-upload-")) | select((.commit.commit.committer.date | fromdateiso8601) < $cutoff) | .name' |
-            while read -r branch; do
+          # The branch list has only each branch's commit hash, not its date: ask for the date of the ones that
+          # are upload branches (reading `.commit.commit.committer.date` of the list is null, and made jq, and so
+          # this whole job, fail the first time an upload branch existed).
+          gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" \
+            --jq '.[] | select(.name | startswith("hnmod-upload-")) | "\(.name) \(.commit.sha)"' |
+            while read -r branch sha; do
               [ -n "$branch" ] || continue
-              echo "Removing temporary upload branch $branch"
-              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" || true
+              made="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.commit.committer.date')"
+              if [ "$(date -u -d "$made" +%s)" -lt "$cutoff" ]; then
+                echo "Removing temporary upload branch $branch"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" || true
+              fi
             done
