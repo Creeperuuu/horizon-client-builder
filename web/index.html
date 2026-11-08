@@ -113,7 +113,7 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
 
       <label for="mods">Native mods <small>(optional, multiple .hnmod files)</small></label>
       <input id="mods" type="file" accept=".hnmod,application/zip" multiple>
-      <p class="hint">Selected .hnmod bundles are compiled into the client. Horizon pins and hook API requirements are checked before building.</p>
+      <p class="hint">Selected .hnmod bundles are compiled into the client. Horizon pins and hook API requirements are checked before building. They are uploaded to a temporary branch of this public repository, so anyone can read them until it is deleted (within a day).</p>
 
       <label for="token">GitHub token <small>(to upload mods and start the build)</small></label>
       <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="fine-grained: Actions + Contents read/write">
@@ -195,7 +195,6 @@ $("go").addEventListener("click", async () => {
   if (!token) return say("Paste a token first: starting a build needs one.", "err");
   $("go").disabled = true; say("Starting…");
   try {
-    let modsTag = "";
     let modsBranch = "";
     const selected = [...$("mods").files];
     if (selected.length) {
@@ -219,16 +218,16 @@ $("go").addEventListener("click", async () => {
         const uploaded = await api(`/repos/${OWNER}/${REPO}/contents/.hnmod-uploads/${tag}/${encodeURIComponent(file.name)}`, { method: "PUT", auth: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "Upload temporary native mod bundle", content: encoded, branch: tag }) });
         if (!uploaded.ok) throw new Error("Upload failed for " + file.name + " (" + uploaded.status + "): " + (await uploaded.text()));
       }
-      modsTag = tag;
       modsBranch = tag;
     }
     const res = await api(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/dispatches`, {
       method: "POST", auth: true,
-      body: JSON.stringify({ ref: "main", inputs: { revision: rev, profile: $("profile").value, mods_tag: modsTag, mods_branch: modsBranch } }),
+      body: JSON.stringify({ ref: "main", inputs: { revision: rev, profile: $("profile").value, mods_branch: modsBranch } }),
     });
     if (res.status === 204) { say("Build started. It shows under Builds in a moment; a release build takes a while.", "ok"); setTimeout(refresh, 4000); }
     else if (res.status === 401) say("GitHub rejected the token.", "err");
     else if (res.status === 403 || res.status === 404) say("The token can't start builds on this repository (it needs Actions: read and write).", "err");
+    else if (res.status === 422) say("GitHub refused the build's inputs: " + ((await res.json()).message || ""), "err");
     else say(`GitHub answered ${res.status}: ${(await res.json()).message || ""}`, "err");
   } catch (e) { say(e.message || "Could not reach GitHub.", "err"); }
   $("go").disabled = false;
@@ -238,9 +237,14 @@ $("go").addEventListener("click", async () => {
 async function refresh() {
   let busy = false;
   try {
+    const get = async (path) => {
+      const res = await api(path);
+      if (!res.ok) throw new Error(res.status === 403 ? "GitHub's rate limit is reached; try again in a few minutes" : `GitHub answered ${res.status}`);
+      return res.json();
+    };
     const [runs, rels] = await Promise.all([
-      api(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/runs?per_page=10`).then((r) => r.json()),
-      api(`/repos/${OWNER}/${REPO}/releases?per_page=40`).then((r) => r.json()),
+      get(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/runs?per_page=10`),
+      get(`/repos/${OWNER}/${REPO}/releases?per_page=40`),
     ]);
     const active = $("active"); active.replaceChildren();
     const shown = (runs.workflow_runs || []).filter((r) =>
@@ -264,15 +268,18 @@ async function refresh() {
       const exe = r.assets.find((a) => a.name === "horizon-client.exe");
       if (!exe) continue;
       const sha = (r.body.match(/\/commit\/([0-9a-f]{40})/) || [])[1];
-      const profile = r.tag_name.endsWith("-fast") ? "fast" : "release";
+      const profile = /-fast(-m[0-9a-f]{8})?$/.test(r.tag_name) ? "fast" : "release";
+      const modsLine = ((r.body || "").match(/- Mods: (.*)/) || [])[1];
+      const modList = modsLine && modsLine !== "none" ? modsLine.replace(/`/g, "") : "";
       const meta = el("span", { class: "meta" },
         sha ? el("a", { href: `https://github.com/${UPSTREAM}/commit/${sha}`, target: "_blank", rel: "noopener" }, sha.slice(0, 7)) : "",
-        `${sha ? " · " : ""}${profile} · ${(exe.size / 1048576).toFixed(0)} MB · ${ago(r.created_at)}`);
+        `${sha ? " · " : ""}${profile} · ${(exe.size / 1048576).toFixed(0)} MB · ${ago(r.created_at)}`,
+        modList ? el("span", {}, el("br"), "Mods: " + modList) : "");
       list.append(el("li", { class: "row " + profile },
         el("b", {}, r.name.replace(/ \((release|fast)\)$/, "")), meta,
         el("a", { class: "btn", href: exe.browser_download_url }, "Download")));
     }
-  } catch { $("list").replaceChildren(el("li", { class: "empty" }, "Could not load builds from GitHub right now.")); }
+  } catch (e) { $("list").replaceChildren(el("li", { class: "empty" }, `Could not load builds: ${e.message || "no answer from GitHub"}.`)); }
   clearTimeout(refresh.t); refresh.t = setTimeout(refresh, busy ? 15000 : 60000);
 }
 loadNightlies(); refresh();

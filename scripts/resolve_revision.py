@@ -91,7 +91,13 @@ def resolve(revision):
         name, sha = newest_nightly()
         return "nightly", name, sha
     if re.fullmatch(r"[0-9a-fA-F]{7,40}", revision):
-        return "commit", revision, api(f"/repos/{UPSTREAM}/commits/{revision}")["sha"]
+        sha = api(f"/repos/{UPSTREAM}/commits/{revision}")["sha"]
+        # A commit that a Nightly or release tag points at is that build (and is stamped as it).
+        tags = sorted((ref.removeprefix("refs/tags/") for ref, tagged in ls_remote("refs/tags/nightly-source/*", "refs/tags/v*").items() if tagged == sha),
+                      key=lambda t: not NIGHTLY_TAG.match(t))
+        if tags:
+            return ("nightly" if NIGHTLY_TAG.match(tags[0]) else "tag"), tags[0], sha
+        return "commit", revision, sha
     name = revision.removeprefix("refs/tags/").removeprefix("refs/heads/")
     refs = ls_remote(f"refs/tags/{name}", f"refs/heads/{name}", f"refs/tags/nightly-source/{name}")
     for ref, kind in (
