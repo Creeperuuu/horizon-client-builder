@@ -273,9 +273,50 @@ pub fn decompress(frame: Vec<u8>, threshold: Option<usize>) -> Result<Vec<u8>> {
 
 
 def normalize_target_lifetimes(manifest_text):
-    """Remove elided lifetimes from inherent-method target IDs."""
-    pattern = r"""(?m)^([ \t]*target[ \t]*=[ \t]*"[^"\n]*)<'_>([^"\n]*")"""
-    return re.sub(pattern, lambda match: match.group(1) + match.group(2), manifest_text)
+    """Use the fully-qualified lifetime spelling expected by horizon-mixins."""
+    # Older bundles commonly omit the elided lifetime on Horizon's Game methods.
+    return re.sub(r'(?<![A-Za-z0-9_])Game::', "Game<'_>::", manifest_text)
+    
+
+def patch_fast_items_target(tree):
+    """Expose the existing dropped-item method to horizon-mixins' source index."""
+    source = pathlib.Path(tree) / "crates/horizon-client/src/game/item_draw.rs"
+    if not source.is_file():
+        return
+    text = source.read_text(encoding="utf-8")
+    text = re.sub(
+        r"(?m)^([ \t]*)pub\(super\)([ \t]+fn[ \t]+dropped_item_geometry\b)",
+        r"\1pub\2",
+        text,
+    )
+    source.write_text(text, encoding="utf-8", newline="\n")
+
+
+def ensure_named_hook_catalog(tree, mods_dir):
+    """Backfill the small named-hook catalog for older Horizon source pins."""
+    hooks = {}
+    source = pathlib.Path(tree) / "crates/horizon-client/src/game/native_hooks.rs"
+    if not source.is_file():
+        return
+    source_text = source.read_text(encoding="utf-8")
+    for manifest in pathlib.Path(mods_dir).glob("*/horizon-mixin.toml"):
+        text = manifest.read_text(encoding="utf-8")
+        names = re.findall(r'(?m)^\s*hook\s*=\s*"([^"]+)"', text)
+        versions = re.findall(r'(?m)^\s*hook_version\s*=\s*(\d+)', text)
+        for name, version in zip(names, versions):
+            fn = f"native_{name}"
+            if not re.search(rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+{re.escape(fn)}\s*\(", source_text):
+                continue
+            hooks[name] = {
+                "name": name,
+                "version": int(version),
+                "target": f"horizon_client::game::native_hooks::Game<'_>::{fn}",
+            }
+    if hooks:
+        catalog = pathlib.Path(tree) / "native-hooks.json"
+        if not catalog.exists():
+            catalog.write_text(json.dumps({"hooks": list(hooks.values()), "helpers": []}, indent=2) + "\n", encoding="utf-8")
+            print(f"Generated native-hooks.json for {', '.join(sorted(hooks))}")
 
 
 def stage(args):
@@ -303,6 +344,7 @@ def stage(args):
         if not (marker.is_file() and marker.read_text().strip() == revision):
             subprocess.run([sys.executable, args.fetch_source, revision, str(tree)], check=True)
         patch_horizon_compat(tree)
+        patch_fast_items_target(tree)
         mixins_candidates = {mixins_revision(tree), *(m["mixins"] for m in records)}
         mixins_rev = max(mixins_candidates, key=lambda rev: date_key(rev, MIXINS_SLUG))
         cli, built = build_cli(mixins_rev, args.mixins_cache)
@@ -319,6 +361,7 @@ def stage(args):
             # Each mod is moved to the commit that is built (the launcher's `repin`).
             text = re.sub(r'(horizon_revision\s*=\s*")[0-9a-f]{40}(")', rf"\g<1>{revision}\2", text)
             manifest.write_text(text, encoding="utf-8", newline="\n")
+        ensure_named_hook_catalog(tree, candidate_mods)
         modded = out / "modded"
         shutil.rmtree(modded, ignore_errors=True)
         # `apply` plans from pristine source itself and stages atomically, so a separate `plan` run only
