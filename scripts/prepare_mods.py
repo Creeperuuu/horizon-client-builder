@@ -247,6 +247,37 @@ def set_output(**values):
                 out.write(f"{key}={value}\n")
 
 
+
+def patch_horizon_compat(tree):
+    """Restore the public frame helper expected by older voice-chat bundles."""
+    frame = pathlib.Path(tree) / "crates" / "horizon-protocol" / "src" / "frame.rs"
+    if not frame.is_file():
+        return
+    source = frame.read_text(encoding="utf-8")
+    if re.search(r"(?m)^pub\s+fn\s+decompress\s*\(", source):
+        return
+    tests = re.search(r"(?m)^#\[cfg\(test\)\]\s*\nmod tests\b", source)
+    if not tests:
+        return
+    shim = """/// Compatibility entry point used by older native voice-chat bundles.
+pub fn decompress(frame: Vec<u8>, threshold: Option<usize>) -> Result<Vec<u8>> {
+    Ok(match body(&frame, threshold, &mut Inflater::default())? {
+        Body::Plain(at) => frame[at..].to_vec(),
+        Body::Inflated(body) => body,
+    })
+}
+
+"""
+    frame.write_text(source[:tests.start()] + shim + source[tests.start():], encoding="utf-8", newline="\n")
+    print("Added horizon_protocol::frame::decompress compatibility shim")
+
+
+def normalize_target_lifetimes(manifest_text):
+    """Remove elided lifetimes from inherent-method target IDs."""
+    pattern = r"""(?m)^([ \t]*target[ \t]*=[ \t]*"[^"\n]*)<'_>([^"\n]*")"""
+    return re.sub(pattern, lambda match: match.group(1) + match.group(2), manifest_text)
+
+
 def stage(args):
     mods_dir = pathlib.Path(args.mods)
     records = json.loads((mods_dir / "mods.json").read_text())
@@ -271,6 +302,7 @@ def stage(args):
         marker = tree / ".horizon-revision"
         if not (marker.is_file() and marker.read_text().strip() == revision):
             subprocess.run([sys.executable, args.fetch_source, revision, str(tree)], check=True)
+        patch_horizon_compat(tree)
         mixins_candidates = {mixins_revision(tree), *(m["mixins"] for m in records)}
         mixins_rev = max(mixins_candidates, key=lambda rev: date_key(rev, MIXINS_SLUG))
         cli, built = build_cli(mixins_rev, args.mixins_cache)
@@ -283,6 +315,7 @@ def stage(args):
             shutil.copytree(mods_dir / "bundles" / record["id"], dst)
             manifest = dst / "horizon-mixin.toml"
             text = drop_table(manifest.read_text(encoding="utf-8"), "dependencies")
+            text = normalize_target_lifetimes(text)
             # Each mod is moved to the commit that is built (the launcher's `repin`).
             text = re.sub(r'(horizon_revision\s*=\s*")[0-9a-f]{40}(")', rf"\g<1>{revision}\2", text)
             manifest.write_text(text, encoding="utf-8", newline="\n")
