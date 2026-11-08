@@ -1,8 +1,8 @@
 # horizon-client builder
 
 Builds **`horizon-client.exe`** (Windows x64) from [horizon-rust/horizon](https://github.com/horizon-rust/horizon)
-on GitHub Actions, at the revision you pick, and lists every finished build on a GitHub Pages site with a
-download button.
+on GitHub Actions, at the revision you pick and with your native mods (`.hnmod`) compiled in, and lists every
+finished build on a GitHub Pages site with a download button.
 
 **Site:** https://creeperuuu.github.io/horizon-client-builder/
 
@@ -17,8 +17,49 @@ gh workflow run build.yml -f revision=nightly
 gh workflow run build.yml -f revision=2026-11-05-f319701 -f profile=fast
 ```
 
-The token is only for *starting* a build. Use a fine-grained token limited to this repository with
-**Actions: read and write**. The page keeps it in the tab's memory and sends it nowhere but api.github.com.
+The token is only for *starting* a build and for adding or removing mods. Use a fine-grained token limited to
+this repository with **Actions: read and write** and **Contents: read and write**. The page keeps it in the
+tab's memory and sends it nowhere but api.github.com.
+
+## Mods
+
+Put native mods in [`mods/`](mods) (the site's **Mods** panel uploads them there): `.hnmod` files, an unpacked
+`.hnmod`, or a bundle folder with `horizon-mixin.toml`. A build includes all of them unless you name some
+(`mods=a.hnmod,my_mod`) or none (`mods=none`, a clean client).
+
+It follows the launcher's native build (`docs/native-mods.md` in Horizon):
+
+1. each `.hnmod` is checked by the rules of Horizon's own `Bundle::read` (no links or `..`, only Rust, TOML and
+   `data/`, size limits, manifest and mixin agree). Nothing in it runs until the build.
+2. **The commit to build on** comes from the mods' pins (`[compatibility] horizon_revision`), as in the launcher:
+
+   | Mods | Builds on |
+   | --- | --- |
+   | none pin a commit | the revision you asked for |
+   | all pin one commit | that commit, even if you asked for another |
+   | pin different commits | the newest of them, only with `allow_mismatch`; else the build stops and says who pins what |
+   | name a hook points' version (`hooks`) | a commit whose `NATIVE_HOOKS_API` is that or later and has the named hook points |
+   | `pins=ignore` | the revision you asked for, every mod moved to it ("Rebuild on Horizon") |
+
+3. `horizon-mixins` is installed at the commit the mods name (else the `MIXINS_REV` the launcher of that Horizon
+   commit uses), `apply` stages the modded source, and that is compiled with `--features horizon-client/mods`
+   while the revision has it. Rust is the launcher's pinned version at that commit.
+4. Vendored C that assumes GCC is made MSVC-safe (`scripts/patch_native_compat.py`); the mods' crates are fetched
+   `--locked` against Horizon's `Cargo.lock`.
+
+A broken mod stops only builds that include it. **Not supported yet**, and named instead of built wrongly: mods
+with an `[api]` trait crate or `trait_method` injections, and `[[post_build]]` steps (the launcher runs those in an
+installed version folder, which a lone exe doesn't have). Native mods aren't sandboxed: build only source you trust.
+
+## Caching
+
+- **Dependencies** (`Swatinem/rust-cache`): Horizon's compiled crates.io dependencies and downloads, restored
+  before anything else in the job into one target folder shared by clean and modded builds. A new commit rebuilds only
+  Horizon's own crates; the run summary says whether the cache hit. One cache per profile (`release`, `fast`).
+- **horizon-mixins** (`actions/cache`): the tool takes minutes to compile and only changes with its commit. It is saved
+  the moment it is built, so a build that fails later (a mod that doesn't apply) keeps it.
+- Horizon's own crates are never cached across commits and every source file gets a fresh time, so a restored cache
+  can't link a stale crate (Horizon's #10421).
 
 ## Revisions
 

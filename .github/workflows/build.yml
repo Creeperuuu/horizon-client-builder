@@ -1,8 +1,8 @@
 name: build horizon-client
 run-name: build horizon-client @ ${{ inputs.revision }} (${{ inputs.profile }})
 
-# Builds horizon-client.exe from horizon-rust/horizon at the revision you pick and publishes it as a
-# release of this repo, which the Pages site lists with a download button.
+# Builds horizon-client.exe from horizon-rust/horizon at the revision you pick, with the native mods in mods/
+# compiled in, and publishes it as a release of this repo, which the Pages site lists with a download button.
 #
 # It builds the way Horizon's own CI (game-build.yml) and launcher (native_mods.rs) do:
 #   - the source is fetched by exact commit from codeload.github.com, links left out, the commit in
@@ -13,11 +13,19 @@ run-name: build horizon-client @ ${{ inputs.revision }} (${{ inputs.profile }})
 #     (`-C target-feature=+crt-static`), so it runs without the Visual C++ redistributable
 #   - checked afterwards with Horizon's own tools/check_imports.py and by starting the program
 #
+# With mods it follows the launcher's native build (docs/native-mods.md in Horizon):
+#   - the mods' pins choose the Horizon commit (scripts/resolve_revision.py explains each choice)
+#   - horizon-mixins is installed at the commit the mods name, `apply` stages the modded source, and the
+#     staged workspace is compiled with `--features horizon-client/mods` when the revision has it
+#   - Rust is the launcher's pinned version at that commit
+#
 # Like Horizon's untrusted nightly build, `build` holds no secrets and only reads contents: what it compiles
 # is somebody's commit. `publish` is the only job that can write, and it never executes what `build` made.
 #
 #   gh workflow run build.yml -f revision=nightly
 #   gh workflow run build.yml -f revision=2026-11-05-f319701 -f profile=fast
+#   gh workflow run build.yml -f mods=none                       # a clean client
+#   gh workflow run build.yml -f mods=my_mod.hnmod -f pins=ignore
 
 on:
   workflow_dispatch:
@@ -32,13 +40,26 @@ on:
         type: choice
         options: [release, fast]
         default: release
+      mods:
+        description: "Native mods from mods/: all, none, or names (file, folder or mod id) separated by commas"
+        type: string
+        default: all
+      pins:
+        description: "follow: the mods' pinned Horizon commit wins (as in the launcher). ignore: build every mod on the revision above."
+        type: choice
+        options: [follow, ignore]
+        default: follow
+      allow_mismatch:
+        description: "Build anyway when mods pin different Horizon commits (on the newest of them)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  # The same revision and profile never build twice at once; a newer request waits its turn.
-  group: build-${{ inputs.revision }}-${{ inputs.profile }}
+  # The same revision, profile and mods never build twice at once; a newer request waits its turn.
+  group: build-${{ inputs.revision }}-${{ inputs.profile }}-${{ inputs.mods }}-${{ inputs.pins }}
   cancel-in-progress: false
 
 env:
@@ -47,7 +68,7 @@ env:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       sha: ${{ steps.r.outputs.sha }}
       short: ${{ steps.r.outputs.short }}
@@ -55,22 +76,32 @@ jobs:
       label: ${{ steps.r.outputs.label }}
       version: ${{ steps.r.outputs.version }}
       nightly: ${{ steps.r.outputs.nightly }}
+      mixins: ${{ steps.r.outputs.mixins }}
+      rust: ${{ steps.r.outputs.rust }}
+      mods: ${{ steps.r.outputs.mods }}
+      mods_count: ${{ steps.r.outputs.mods_count }}
+      mods_digest: ${{ steps.r.outputs.mods_digest }}
+      notes: ${{ steps.r.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - id: r
-        name: Resolve the revision to one commit
+        name: Plan the build (revision, mods, pins)
         env:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ inputs.revision }}
-        run: python3 scripts/resolve_revision.py "$REVISION" | tee -a "$GITHUB_STEP_SUMMARY"
+          MODS: ${{ inputs.mods }}
+          PINS: ${{ inputs.pins }}
+          ALLOW: ${{ inputs.allow_mismatch }}
+        run: |
+          { echo '```'; python3 scripts/resolve_revision.py "$REVISION" --mods mods --select "$MODS" --pins "$PINS" --allow-mismatch "$ALLOW"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: resolve
-    name: build (windows x64, ${{ inputs.profile }})
+    name: build (windows x64, ${{ inputs.profile }}${{ needs.resolve.outputs.mods_count != '0' && format(', {0} mods', needs.resolve.outputs.mods_count) || '' }})
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     defaults:
       run:
         shell: bash
@@ -86,6 +117,13 @@ jobs:
       PROFILE: ${{ inputs.profile }}
       SHA: ${{ needs.resolve.outputs.sha }}
       LABEL: ${{ needs.resolve.outputs.label }}
+      MODS: ${{ inputs.mods }}
+      MODS_COUNT: ${{ needs.resolve.outputs.mods_count }}
+      MIXINS: ${{ needs.resolve.outputs.mixins }}
+      RUST: ${{ needs.resolve.outputs.rust }}
+      # The workspace that is compiled: Horizon's own source, or the mods' staged copy of it.
+      GAME: ${{ needs.resolve.outputs.mods_count != '0' && 'stage' || 'upstream' }}
+      TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,45 +131,114 @@ jobs:
           persist-credentials: false
 
       - name: Horizon's source at the pinned commit
-        run: python builder/scripts/fetch_source.py "$SHA" horizon
+        run: python builder/scripts/fetch_source.py "$SHA" upstream
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust ${{ needs.resolve.outputs.rust }}
+        run: |
+          # With mods, the launcher's own pinned Rust (rust_toolchain.rs at this commit); else stable, as Horizon's CI.
+          if [ "$RUST" != stable ] && ! rustup toolchain install "$RUST" --profile minimal --no-self-update; then
+            echo "::warning::Rust $RUST (the launcher's pin) is not available: using stable"
+            RUST=stable
+          fi
+          if [ "$RUST" = stable ]; then rustup toolchain install stable --profile minimal --no-self-update; fi
+          echo "RUSTUP_TOOLCHAIN=$RUST" >> "$GITHUB_ENV"
 
-      - uses: Swatinem/rust-cache@v2
+      # Horizon's compiled dependencies and the crates.io downloads, kept between builds. Every revision shares
+      # them (a new commit rebuilds only Horizon's own crates), and so do clean and modded builds and the apply
+      # step's `cargo fetch`: restored here, before either runs, into one target folder outside both workspaces.
+      - name: Cache dependencies
+        id: deps
+        uses: Swatinem/rust-cache@v2
         with:
-          workspaces: horizon
-          # Revisions share dependencies, so one cache serves them all; only Horizon's own crates rebuild.
+          workspaces: upstream -> ../target
           shared-key: windows-${{ inputs.profile }}
           cache-on-failure: true
 
-      - name: Build horizon-client
-        working-directory: horizon
-        run: |
-          rustc --version --verbose
-          cargo build --locked --profile "$PROFILE" -p horizon-client --bin horizon-client
+      # ---- native mods: the launcher's steps 2 to 4 (docs/native-mods.md) ----
+      # horizon-mixins takes minutes to compile and only changes with the commit the mods name. It is saved as soon
+      # as it is built, so a build that fails later (a mod that doesn't apply) doesn't throw it away.
+      - name: Restore horizon-mixins
+        if: needs.resolve.outputs.mods_count != '0'
+        id: mixins-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: mixins-tool
+          key: horizon-mixins-${{ needs.resolve.outputs.mixins }}-rust-${{ needs.resolve.outputs.rust }}-${{ runner.os }}
 
-      - name: Check the program
-        working-directory: horizon
+      - name: Build horizon-mixins
+        id: mixins-build
+        if: needs.resolve.outputs.mods_count != '0' && steps.mixins-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked --git https://github.com/horizon-rust/horizon-mixins --rev "$MIXINS" --root mixins-tool horizon-mixins-cli
+
+      - name: Save horizon-mixins
+        if: steps.mixins-build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: mixins-tool
+          key: horizon-mixins-${{ needs.resolve.outputs.mixins }}-rust-${{ needs.resolve.outputs.rust }}-${{ runner.os }}
+
+      - name: Apply the mods to Horizon's source
+        if: needs.resolve.outputs.mods_count != '0'
         run: |
           set -euo pipefail
-          exe="target/$PROFILE/horizon-client.exe"
+          python builder/scripts/stage_mods.py stage --mods builder/mods --select "$MODS" --commit "$SHA" --out mods-staged
+          # horizon-mixins reads `cargo metadata` of the workspace with locked, offline dependencies.
+          (cd upstream && cargo fetch --locked --target "$TARGET")
+          mixins-tool/bin/horizon-mixins apply --workspace upstream --mods mods-staged --out stage
+          # Vendored C that assumes GCC (opus' VAR_ARRAYS) is made portable for MSVC, and the crates the
+          # mods brought are checked against Horizon's Cargo.lock by fetching them locked.
+          python builder/scripts/patch_native_compat.py --stage stage --target "$TARGET"
+          if [ -d stage/native-crates ]; then (cd stage && cargo fetch --locked --target "$TARGET"); fi
+
+      - name: Build horizon-client
+        working-directory: ${{ env.GAME }}
+        run: |
+          set -euo pipefail
+          rustc --version --verbose
+          profile="$PROFILE"
+          # A revision whose Cargo.toml has no [profile.fast] builds with release (the launcher does the same).
+          if [ "$profile" = fast ] && ! grep -q '^\[profile\.fast\]' Cargo.toml; then
+            echo "::warning::this revision has no [profile.fast]: building with release"
+            profile=release
+          fi
+          echo "EFFECTIVE_PROFILE=$profile" >> "$GITHUB_ENV"
+          features=()
+          # The launcher passes the mods feature to a mod build while the revision still has it.
+          if [ "$MODS_COUNT" != 0 ] && python -c "import sys,tomllib; sys.exit(0 if 'mods' in tomllib.load(open('crates/horizon-client/Cargo.toml','rb')).get('features',{}) else 1)"; then
+            features=(--features horizon-client/mods)
+          fi
+          # The target folder is beside the workspaces (not in `upstream` or `stage`), where the cache keeps it.
+          cargo build --locked --profile "$profile" --target-dir ../target "${features[@]}" -p horizon-client --bin horizon-client
+
+      - name: Check the program
+        working-directory: ${{ env.GAME }}
+        run: |
+          set -euo pipefail
+          exe="../target/$EFFECTIVE_PROFILE/horizon-client.exe"
           test -f "$exe" || { echo "::error::$exe was not built"; exit 1; }
-          # Horizon's own check that the .exe needs no DLL a player's Windows lacks.
-          if [ -f tools/check_imports.py ]; then python tools/check_imports.py "$exe"; fi
+          # Horizon's own check that the .exe needs no DLL a player's Windows lacks. A mod that brings a native
+          # library can break it: that is said, not hidden, but doesn't stop a mod build.
+          if [ -f tools/check_imports.py ] && ! python tools/check_imports.py "$exe"; then
+            if [ "$MODS_COUNT" != 0 ]; then echo "::warning::the exe needs a DLL a player's Windows may lack (see the check above)"; else exit 1; fi
+          fi
           if [ -f tools/check_pe_arch.py ]; then python tools/check_pe_arch.py x64 "$exe"; fi
           "$exe" --help | grep -q -- '--resources'
           ls -l "$exe"
 
       - name: Collect
+        env:
+          DEPS_CACHE: ${{ steps.deps.outputs.cache-hit == 'true' && 'hit (nothing but Horizon rebuilt)' || 'partial or cold (restored what matched, saved for next time)' }}
         run: |
           set -euo pipefail
           mkdir dist
-          cp "horizon/target/$PROFILE/horizon-client.exe" dist/horizon-client.exe
+          cp "target/$EFFECTIVE_PROFILE/horizon-client.exe" dist/horizon-client.exe
           (cd dist && sha256sum horizon-client.exe > SHA256SUMS && cat SHA256SUMS)
           {
             echo "### horizon-client.exe"
             echo "- revision: \`$LABEL\` (\`$SHA\`)"
-            echo "- profile: \`$PROFILE\`, size: $(du -h dist/horizon-client.exe | cut -f1)"
+            echo "- profile: \`$EFFECTIVE_PROFILE\`, size: $(du -h dist/horizon-client.exe | cut -f1), mods: $MODS_COUNT"
+            echo "- dependency cache: ${DEPS_CACHE:-none}"
             echo "- version stamp: \`${HORIZON_VERSION:-none}\`, nightly stamp: \`${HORIZON_NIGHTLY:-none}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -156,6 +263,11 @@ jobs:
       LABEL: ${{ needs.resolve.outputs.label }}
       VERSION: ${{ needs.resolve.outputs.version }}
       NIGHTLY: ${{ needs.resolve.outputs.nightly }}
+      MODS_JSON: ${{ needs.resolve.outputs.mods }}
+      MODS_DIGEST: ${{ needs.resolve.outputs.mods_digest }}
+      NOTES: ${{ needs.resolve.outputs.notes }}
+      MIXINS: ${{ needs.resolve.outputs.mixins }}
+      RUST: ${{ needs.resolve.outputs.rust }}
       KEEP: "25"
     steps:
       - uses: actions/download-artifact@v4
@@ -166,15 +278,19 @@ jobs:
       - name: Publish the release
         run: |
           set -euo pipefail
-          tag="horizon-client-$SHORT-$PROFILE"
+          # The same revision and profile with other mods is another build: the mods' digest is in the tag.
+          tag="horizon-client-$SHORT-$PROFILE${MODS_DIGEST:+-m$MODS_DIGEST}"
+          mods=$(python3 -c "import json,os; m=json.loads(os.environ['MODS_JSON'] or '[]'); print(', '.join(f\"\`{x['id']} {x['version']}\`\" for x in m) or 'none')")
           {
             printf '**horizon-client.exe** for Windows x64, built from [`%s`](https://github.com/%s/commit/%s).\n\n' "$SHORT" "$UPSTREAM" "$SHA"
             printf -- '- Revision: %s\n- Profile: `%s`\n' "$LABEL" "$PROFILE"
+            printf -- '- Mods: %s\n' "$mods"
+            if [ -n "$NOTES" ] && [ "$mods" != none ]; then printf -- '- Built on this commit because: %s\n- horizon-mixins `%s`, Rust `%s`\n' "$NOTES" "${MIXINS:0:7}" "$RUST"; fi
             printf -- '- Version stamp: `%s`, nightly stamp: `%s`\n' "${VERSION:-none}" "${NIGHTLY:-none}"
             printf -- '- Built by [run %s](%s/%s/actions/runs/%s)\n\n' "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf 'Unsigned. Check it against `SHA256SUMS`. To play it, import it in the Horizon launcher (Versions, import a build): the program alone needs a version folder'"'"'s game files.\n'
           } > notes.md
-          # Building the same revision and profile again replaces its release.
+          # Building the same revision, profile and mods again replaces its release.
           gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" 2>/dev/null || true
           gh release create "$tag" dist/horizon-client.exe dist/SHA256SUMS \
             -R "$GITHUB_REPOSITORY" --prerelease \

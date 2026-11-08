@@ -80,6 +80,17 @@ ul { list-style: none; margin: 0; padding: 0; }
 .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: var(--amber); margin-right: 8px; animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .dot { animation: none; } }
+section + section { margin-top: 20px; }
+.left { display: grid; gap: 20px; align-content: start; }
+.left section + section { margin-top: 0; }
+.mod { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.mod:first-child { border-top: 0; }
+.mod label { margin: 0; font-weight: 500; display: contents; }
+.mod input[type=checkbox] { width: auto; }
+.mod .size { color: var(--soft); font-size: .84rem; }
+button.quiet { background: transparent; color: var(--soft); border: 1px solid var(--line); padding: 4px 10px; font-size: .84rem; }
+.check { display: flex; gap: 8px; align-items: flex-start; font-weight: 400; margin-top: 12px; }
+.check input { width: auto; margin-top: 4px; }
 footer { margin-top: 28px; color: var(--soft); font-size: .86rem; max-width: 70ch; }
 footer a { color: inherit; }
 code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .9em; }
@@ -87,10 +98,11 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
 </head>
 <body>
 <main>
-  <h1>Pick a commit. Get horizon-client.exe.</h1>
-  <p class="lede">Builds <a href="https://github.com/horizon-rust/horizon" style="color:inherit">Horizon</a> for Windows x64 on GitHub's runners, from the exact revision you choose, the way Horizon's own release builds are made. Finished builds stay here to download.</p>
+  <h1>Pick a commit, add your mods, get horizon-client.exe.</h1>
+  <p class="lede">Builds <a href="https://github.com/horizon-rust/horizon" style="color:inherit">Horizon</a> for Windows x64 on GitHub's runners, from the exact revision you choose, with your native mods (.hnmod) compiled in, the way the Horizon launcher builds them. Finished builds stay here to download.</p>
 
   <div class="layout">
+    <div class="left">
     <section aria-labelledby="new">
       <h2 id="new">New build</h2>
 
@@ -111,13 +123,32 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
         <option value="fast">Fast: no LTO, builds much sooner</option>
       </select>
 
-      <label for="token">GitHub token <small>(to start the build)</small></label>
-      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="fine-grained, Actions: read and write">
-      <p class="hint">Starting a build needs a token for this repository. It stays in this tab's memory, goes only to api.github.com, and is gone when you close the tab. Downloading needs none.</p>
+      <div id="modopts" hidden>
+        <label for="pins">Mods' Horizon pins</label>
+        <select id="pins">
+          <option value="follow">Follow them: a pinned commit wins, as in the launcher</option>
+          <option value="ignore">Ignore them: build every mod on the revision above</option>
+        </select>
+        <label class="check"><input id="mismatch" type="checkbox"><span>Build anyway if mods pin different commits (on the newest)</span></label>
+      </div>
+
+      <label for="token">GitHub token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="fine-grained: Actions and Contents, read and write">
+      <p class="hint">Needed to start a build and to upload mods, for this repository only. It stays in this tab's memory, goes only to api.github.com, and is gone when you close the tab. Downloading needs none.</p>
 
       <button id="go" class="full">Start build</button>
       <p id="status" class="status" role="status" aria-live="polite"></p>
     </section>
+
+    <section aria-labelledby="modsh">
+      <h2 id="modsh">Mods</h2>
+      <div id="mods"><p class="empty">Loading…</p></div>
+      <label for="up">Add .hnmod files</label>
+      <input id="up" type="file" accept=".hnmod" multiple>
+      <p class="hint">Uploaded to this repository's mods/ folder, so they are public. A build includes the ticked ones.</p>
+      <p id="modstatus" class="status" role="status" aria-live="polite"></p>
+    </section>
+    </div>
 
     <section aria-labelledby="builds">
       <h2 id="builds">Builds</h2>
@@ -127,7 +158,7 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
   </div>
 
   <footer>
-    The program on its own can't start: it needs a version folder's game files. In the Horizon launcher, import it as a build (Versions page) and it plays with the files of a release or Nightly you already have. Builds are unsigned; compare the download with <code>SHA256SUMS</code> on its release page.
+    The program on its own can't start: it needs a version folder's game files. In the Horizon launcher, import it as a build (Versions page) and it plays with the files of a release or Nightly you already have. Native mods aren't sandboxed: only build mods whose source you trust. Mods with an [api] crate or post-build steps aren't supported yet (a build names them and stops). Builds are unsigned; compare the download with <code>SHA256SUMS</code> on its release page.
   </footer>
 </main>
 
@@ -193,23 +224,104 @@ $("go").addEventListener("click", async () => {
   try {
     const res = await api(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/dispatches`, {
       method: "POST", auth: true,
-      body: JSON.stringify({ ref: "main", inputs: { revision: rev, profile: $("profile").value } }),
+      body: JSON.stringify({ ref: "main", inputs: {
+        revision: rev, profile: $("profile").value, mods: selectedMods(),
+        pins: $("pins").value, allow_mismatch: String($("mismatch").checked) } }),
     });
     if (res.status === 204) { say("Build started. It shows under Builds in a moment; a release build takes a while.", "ok"); setTimeout(refresh, 4000); }
     else if (res.status === 401) say("GitHub rejected the token.", "err");
     else if (res.status === 403 || res.status === 404) say("The token can't start builds on this repository (it needs Actions: read and write).", "err");
+    else if (res.status === 422) say("GitHub refused the build's inputs: " + ((await res.json()).message || ""), "err");
     else say(`GitHub answered ${res.status}: ${(await res.json()).message || ""}`, "err");
   } catch (e) { say("Could not reach GitHub.", "err"); }
   $("go").disabled = false;
 });
 
+/* ---- mods ---- */
+let mods = [];               // what mods/ holds: {name, sha, size, dir}
+let modsKnown = false;       // false when GitHub didn't answer: the build then takes "all", never a silent "none"
+const ticked = new Map();     // name -> included in the next build (default yes)
+function selectedMods() {
+  if (!modsKnown) return "all";
+  if (!mods.length) return "none";
+  const on = mods.filter((m) => ticked.get(m.name) !== false).map((m) => m.name);
+  return on.length === mods.length ? "all" : on.length ? on.join(",") : "none";
+}
+function modNote(text, kind = "") { const n = $("modstatus"); n.textContent = text; n.className = "status " + kind; }
+async function loadMods() {
+  let failed = "";
+  try {
+    const res = await api(`/repos/${OWNER}/${REPO}/contents/mods`);
+    if (res.status === 404) { mods = []; modsKnown = true; }
+    else if (!res.ok) throw new Error(res.status === 403 ? "GitHub's rate limit is reached" : `GitHub answered ${res.status}`);
+    else {
+      mods = (await res.json()).filter((i) => /\.hnmod$/i.test(i.name) || i.type === "dir")
+                .map((i) => ({ name: i.name, sha: i.sha, size: i.size, dir: i.type === "dir" }));
+      modsKnown = true;
+    }
+  } catch (e) { failed = e.message || "no answer from GitHub"; }
+  const box = $("mods"); box.replaceChildren();
+  if (failed) box.append(el("p", { class: "empty" }, `Could not read mods/ (${failed}). A build started now includes all of them.`));
+  else if (!mods.length) box.append(el("p", { class: "empty" }, "No mods yet. Builds are a clean client until you add one."));
+  for (const m of mods) {
+    const cb = el("input", { type: "checkbox", "aria-label": "Include " + m.name });
+    cb.checked = ticked.get(m.name) !== false;
+    cb.addEventListener("change", () => { ticked.set(m.name, cb.checked); syncOptions(); });
+    const row = el("div", { class: "mod" }, cb, el("span", {}, m.name + (m.dir ? " (folder)" : "")),
+      el("span", { class: "size" }, m.dir ? "" : (m.size / 1024).toFixed(0) + " KB"));
+    if (!m.dir) {
+      const rm = el("button", { class: "quiet", type: "button" }, "Remove");
+      rm.addEventListener("click", () => removeMod(m));
+      row.lastChild.replaceChildren(el("span", { class: "size" }, (m.size / 1024).toFixed(0) + " KB "), rm);
+    }
+    box.append(row);
+  }
+  syncOptions();
+}
+function syncOptions() { $("modopts").hidden = selectedMods() === "none"; }
+function toBase64(buf) {
+  let bin = ""; const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+async function put(path, body) {
+  return api(path, { method: "PUT", auth: true, body: JSON.stringify({ branch: "main", ...body }) });
+}
+$("up").addEventListener("change", async (e) => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (!token) return modNote("Paste a token first: adding a mod commits it to this repository.", "err");
+  for (const file of files) {
+    if (!/^[A-Za-z0-9._-]+\.hnmod$/.test(file.name)) { modNote(`${file.name}: names may use letters, digits, . _ - and end in .hnmod.`, "err"); continue; }
+    if (file.size > 40 << 20) { modNote(`${file.name} is over 40 MB.`, "err"); continue; }
+    modNote(`Adding ${file.name}…`);
+    const old = mods.find((m) => m.name === file.name);
+    const res = await put(`/repos/${OWNER}/${REPO}/contents/mods/${encodeURIComponent(file.name)}`, {
+      message: `Add mod ${file.name}`, content: toBase64(await file.arrayBuffer()), ...(old ? { sha: old.sha } : {}) });
+    if (!res.ok) return modNote(`GitHub refused ${file.name} (${res.status}): ${(await res.json()).message || ""}. The token needs Contents: read and write.`, "err");
+  }
+  modNote("Added.", "ok"); loadMods();
+});
+async function removeMod(m) {
+  if (!token) return modNote("Paste a token first.", "err");
+  if (!confirm(`Remove ${m.name} from mods/?`)) return;
+  const res = await api(`/repos/${OWNER}/${REPO}/contents/mods/${encodeURIComponent(m.name)}`, {
+    method: "DELETE", auth: true, body: JSON.stringify({ message: `Remove mod ${m.name}`, sha: m.sha, branch: "main" }) });
+  if (res.ok) { modNote(`${m.name} removed.`, "ok"); loadMods(); }
+  else modNote(`GitHub refused (${res.status}): ${(await res.json()).message || ""}`, "err");
+}
+
 /* ---- builds ---- */
 async function refresh() {
   let busy = false;
   try {
+    const get = async (path) => {
+      const res = await api(path);
+      if (!res.ok) throw new Error(res.status === 403 ? "GitHub's rate limit is reached; try again in a few minutes" : `GitHub answered ${res.status}`);
+      return res.json();
+    };
     const [runs, rels] = await Promise.all([
-      api(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/runs?per_page=10`).then((r) => r.json()),
-      api(`/repos/${OWNER}/${REPO}/releases?per_page=40`).then((r) => r.json()),
+      get(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/runs?per_page=10`),
+      get(`/repos/${OWNER}/${REPO}/releases?per_page=40`),
     ]);
     const active = $("active"); active.replaceChildren();
     const shown = (runs.workflow_runs || []).filter((r) =>
@@ -233,18 +345,21 @@ async function refresh() {
       const exe = r.assets.find((a) => a.name === "horizon-client.exe");
       if (!exe) continue;
       const sha = (r.body.match(/\/commit\/([0-9a-f]{40})/) || [])[1];
-      const profile = r.tag_name.endsWith("-fast") ? "fast" : "release";
+      const profile = /-fast(-m[0-9a-f]{8})?$/.test(r.tag_name) ? "fast" : "release";
+      const withMods = ((r.body || "").match(/- Mods: (.*)/) || [])[1];
+      const modList = withMods && withMods !== "none" ? withMods.replace(/`/g, "") : "";
       const meta = el("span", { class: "meta" },
         sha ? el("a", { href: `https://github.com/${UPSTREAM}/commit/${sha}`, target: "_blank", rel: "noopener" }, sha.slice(0, 7)) : "",
-        `${sha ? " · " : ""}${profile} · ${(exe.size / 1048576).toFixed(0)} MB · ${ago(r.created_at)}`);
+        `${sha ? " · " : ""}${profile} · ${(exe.size / 1048576).toFixed(0)} MB · ${ago(r.created_at)}`,
+        modList ? el("span", {}, el("br"), "Mods: " + modList) : "");
       list.append(el("li", { class: "row " + profile },
         el("b", {}, r.name.replace(/ \((release|fast)\)$/, "")), meta,
         el("a", { class: "btn", href: exe.browser_download_url }, "Download")));
     }
-  } catch { $("list").replaceChildren(el("li", { class: "empty" }, "Could not load builds from GitHub right now.")); }
+  } catch (e) { $("list").replaceChildren(el("li", { class: "empty" }, `Could not load builds: ${e.message || "no answer from GitHub"}.`)); }
   clearTimeout(refresh.t); refresh.t = setTimeout(refresh, busy ? 15000 : 60000);
 }
-loadNightlies(); refresh();
+loadNightlies(); loadMods(); refresh();
 </script>
 </body>
 </html>
