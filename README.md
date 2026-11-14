@@ -9,7 +9,8 @@ download button.
 ## Using it
 
 Open the site, pick a revision and a profile, optionally select one or more `.hnmod` files, paste a fine-grained token and press **Start build**. When it finishes
-the build appears in the list; downloading needs no token. You can also start one from the Actions tab or
+the build appears in the list (the list checks GitHub every few seconds while a build runs, and with a token pasted it
+never runs into the anonymous rate limit); downloading needs no token. You can also start one from the Actions tab or
 the CLI:
 
 ```
@@ -58,9 +59,13 @@ Each build is a pre-release named `horizon-client-<short>-<profile>` (plus `-m<d
 
 ## Native `.hnmod` bundles
 
-Select one or more `.hnmod` files in the site before starting the build. The site uploads them through GitHub's
-REST Contents API to a temporary `hnmod-upload-*` branch (public, like the rest of the repository, and deleted by
-the daily cleanup), then starts the workflow with that branch. A build without mods is a clean client.
+Select as many `.hnmod` files as you like (up to 100) in the site before starting the build. The site uploads them
+through GitHub's Git Data API (a few files at a time as blobs, then **one** commit, so twelve mods take about as long
+as three) to a temporary `hnmod-upload-<uuid>` branch, then starts the workflow with that branch. The branch is public,
+like the rest of the repository, but only briefly: the workflow's `mods` job copies the files into a one-day artifact
+and **deletes the branch itself** as soon as it starts, and the `cleanup` job at the end of every run deletes the
+branch (if it is somehow still there) and the artifact, whether the build succeeded, failed or was cancelled. A build
+without mods is a clean client.
 
 What `scripts/prepare_mods.py` does follows the Horizon launcher's native build (`docs/native-mods.md`):
 
@@ -79,12 +84,28 @@ The release says which commit was really built (the mods' pins can differ from t
 mods are in it. A modded build never replaces the clean one: the tag carries a digest of the mods' files
 (`horizon-client-<short>-<profile>-m<digest>`).
 
+### Fallback commit
+
+If some of the selected mods don't support the revision you asked for (for instance the newest Nightly), the build
+falls back to a commit they do support instead of failing. Nothing is hidden about it. The release notes and the
+**Builds** list on the site (a `fallback` badge) show:
+
+- the commit that was asked for and the commit that was really built, both linked;
+- which mods don't support the requested one and why (`needs hook API 427; 9ee13cd has 415`, or `pinned to ba6344a`);
+- every commit that was tried, newest mod pin first, and why the ones that failed did not apply.
+
+A mod supports a commit when it names a hook API version that commit's `NATIVE_HOOKS_API` meets, or when it pins that
+exact commit. The notes end with a hidden `<!-- build-info {...} -->` block with the same facts as JSON, which is what the site
+reads (`scripts/release_notes.py`). Older releases without it are listed as before.
+
 **Not supported yet**, and refused by name instead of built wrongly: mods with an `[api]` trait crate or
 `trait_method` injections, and `[[post_build]]` steps (the launcher runs those inside an installed version folder,
 which a lone exe doesn't have). Native mods aren't sandboxed: only build mods whose source you trust.
 
-Limits: 10 mods per build, 40 MiB per archive, 200 MiB total. The fine-grained token must have Actions and Contents
-read/write access to this repository.
+Limits: 100 mods per build (a guard against runaway uploads), 40 MiB per archive, 200 MiB total. The fine-grained
+token must have Actions and Contents read/write access to this repository. With many mods that pin different
+commits, one commit that accepts all of them may not exist; the build then fails and lists, per commit it tried, why
+it did not apply.
 
 ## Caching
 
@@ -102,7 +123,21 @@ Builds get faster once the caches are warm. The run summary says whether the dep
 
 ## Storage cleanup
 
-`.github/workflows/cleanup.yml` runs daily and deletes workflow runs and releases older than 24 hours. Build artifacts already have a one-day retention period. The cleanup can also be started manually from Actions.
+`.github/workflows/cleanup.yml` runs every six hours and deletes workflow runs and releases older than 24 hours. Build
+artifacts already have a one-day retention period. It is also the backstop for temporary `hnmod-upload-*` branches
+older than three hours (the build itself deletes its branch, so this only catches uploads whose build never
+started). It can also be started manually from Actions.
+
+## Branches
+
+`main` is the only branch. Temporary `hnmod-upload-*` branches exist for a minute or so during a modded build and
+are then deleted automatically.
+
+## Tests
+
+`python3 -m unittest discover -s tests -v` runs the offline tests of `scripts/prepare_mods.py` (more than ten mods,
+the support rules, a simulated fallback) and `scripts/release_notes.py`. The `tests` workflow runs them on every
+change to the scripts.
 
 ## Playing a build
 

@@ -1,8 +1,8 @@
-name: Daily storage cleanup
+name: Storage cleanup
 
 on:
   schedule:
-    - cron: "17 0 * * *"
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -20,6 +20,9 @@ jobs:
         run: |
           set -euo pipefail
           cutoff="$(date -u -d '24 hours ago' +%s)"
+          # The build deletes its own upload branch as soon as it has the mods (and again when the run ends), so a
+          # branch still here after a few hours was left by a build that never started: this is only the backstop.
+          branch_cutoff="$(date -u -d '3 hours ago' +%s)"
 
           gh run list -R "$GITHUB_REPOSITORY" --limit 1000 --json databaseId,createdAt |
             jq -r --argjson cutoff "$cutoff" '.[] | select((.createdAt | fromdateiso8601) < $cutoff) | .databaseId' |
@@ -37,15 +40,15 @@ jobs:
               gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" || true
             done
 
-          # The branch list has only each branch's commit hash, not its date: ask for the date of the ones that
-          # are upload branches (reading `.commit.commit.committer.date` of the list is null, and made jq, and so
-          # this whole job, fail the first time an upload branch existed).
+          # Stray temporary upload branches. The branch list has only each branch's commit hash, not its date: ask for
+          # the date of the ones that are upload branches (reading `.commit.commit.committer.date` of the list is
+          # null, and made jq, and so this whole job, fail the first time an upload branch existed).
           gh api --paginate "repos/$GITHUB_REPOSITORY/branches?per_page=100" \
             --jq '.[] | select(.name | startswith("hnmod-upload-")) | "\(.name) \(.commit.sha)"' |
             while read -r branch sha; do
               [ -n "$branch" ] || continue
               made="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.commit.committer.date')"
-              if [ "$(date -u -d "$made" +%s)" -lt "$cutoff" ]; then
+              if [ "$(date -u -d "$made" +%s)" -lt "$branch_cutoff" ]; then
                 echo "Removing temporary upload branch $branch"
                 gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" || true
               fi

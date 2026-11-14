@@ -24,6 +24,14 @@ run-name: build horizon-client @ ${{ inputs.revision }} (${{ inputs.profile }})
 #   - the horizon-mixins tool (actions/cache), saved as soon as it is built, so a mod that fails to apply
 #     doesn't throw away minutes of compiling
 #
+# The uploaded .hnmod files sit on a temporary `hnmod-upload-*` branch only until the `mods` job has copied them
+# into a one-day artifact (a minute or so): that job deletes the branch itself, and `cleanup` makes sure of it (and
+# deletes the artifact) when the run ends, however it ends.
+#
+# When some mods don't support the revision that was asked for (say the newest Nightly), the build falls back to a
+# commit they do support. The release says which commit that was, which mods caused it and which commits were
+# tried (scripts/release_notes.py); the site shows it.
+#
 # Like Horizon's untrusted nightly build, `build` holds no secrets and only reads contents: what it compiles
 # is somebody's commit. `publish` is the only job that can write, and it never executes what `build` made.
 #
@@ -62,6 +70,45 @@ env:
   UPSTREAM: horizon-rust/horizon
 
 jobs:
+  # Takes the .hnmod files off the temporary upload branch and deletes the branch straight away, so they are
+  # public for a minute instead of for the whole build. `build` gets them as a one-day artifact.
+  mods:
+    if: inputs.mods_branch != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # only to delete the temporary upload branch
+    env:
+      MODS_BRANCH: ${{ inputs.mods_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the branch name
+        run: |
+          # Only a temporary upload branch may be read or deleted here, never main.
+          [[ "$MODS_BRANCH" =~ ^hnmod-upload-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || {
+            echo "::error::mods_branch must be a hnmod-upload-<uuid> branch made by the site"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Take the .hnmod files from the branch
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$MODS_BRANCH"
+          mkdir -p raw mods
+          git archive FETCH_HEAD .hnmod-uploads | tar -x -C raw
+          find raw -type f -name '*.hnmod' -exec cp {} mods/ \;
+          ls -l mods
+          test -n "$(ls -A mods)" || { echo "::error::the upload branch has no .hnmod files"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hnmod-uploads
+          path: mods/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Delete the temporary upload branch
+        if: always()
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$MODS_BRANCH" && echo "Deleted $MODS_BRANCH" || echo "$MODS_BRANCH was already gone"
+
   resolve:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -82,7 +129,9 @@ jobs:
           { echo '```'; python3 scripts/resolve_revision.py "$REVISION"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
   build:
-    needs: resolve
+    needs: [resolve, mods]
+    # `mods` is skipped for a clean client; if it ran it must have worked.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && (needs.mods.result == 'success' || needs.mods.result == 'skipped') }}
     name: build (windows x64, ${{ inputs.profile }}${{ inputs.mods_branch != '' && ', with mods' || '' }})
     runs-on: windows-latest
     timeout-minutes: 150
@@ -97,6 +146,7 @@ jobs:
       mods: ${{ steps.stage.outputs.mods }}
       digest: ${{ steps.stage.outputs.digest }}
       mixins: ${{ steps.stage.outputs.mixins }}
+      fallback: ${{ steps.stage.outputs.fallback }}
     env:
       # The C runtime linked in, so the game runs without the Visual C++ redistributable (game-build.yml).
       RUSTFLAGS: -C target-feature=+crt-static
@@ -127,17 +177,16 @@ jobs:
           key: horizon-mixins-tools-${{ runner.os }}-${{ github.run_id }}
           restore-keys: horizon-mixins-tools-${{ runner.os }}-
 
-      - name: Download and validate selected native mods
+      - name: Download the selected native mods
         if: inputs.mods_branch != ''
-        env:
-          MODS_BRANCH: ${{ inputs.mods_branch }}
-        run: |
-          set -euo pipefail
-          mkdir -p builder/mod-uploads
-          git -C builder fetch --depth=1 origin "$MODS_BRANCH"
-          git -C builder archive FETCH_HEAD .hnmod-uploads | tar -x -C builder/mod-uploads
-          find builder/mod-uploads -type f -name '*.hnmod' -exec cp {} builder/mod-uploads/ \;
-          python builder/scripts/prepare_mods.py extract builder/mod-uploads builder/prepared-mods
+        uses: actions/download-artifact@v4
+        with:
+          name: hnmod-uploads
+          path: builder/mod-uploads
+
+      - name: Validate the native mods
+        if: inputs.mods_branch != ''
+        run: python builder/scripts/prepare_mods.py extract builder/mod-uploads builder/prepared-mods
 
       - name: Apply native mods using Horizon's revision rules
         id: stage
@@ -270,8 +319,14 @@ jobs:
       MODS_JSON: ${{ needs.build.outputs.mods }}
       MODS_DIGEST: ${{ needs.build.outputs.digest }}
       MIXINS: ${{ needs.build.outputs.mixins }}
+      FALLBACK_JSON: ${{ needs.build.outputs.fallback }}
+      REQUESTED_SHA: ${{ needs.resolve.outputs.sha }}
       KEEP: "25"
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           name: horizon-client
@@ -283,17 +338,9 @@ jobs:
           # The same revision and profile with other mods is another build: the mods' digest is in the tag, so a
           # modded build never replaces the clean one (or another set of mods).
           tag="horizon-client-$SHORT-$PROFILE${MODS_DIGEST:+-m$MODS_DIGEST}"
-          mods=$(python3 -c "import json,os; m=json.loads(os.environ['MODS_JSON'] or '[]'); print(', '.join(f\"\`{x['id']} {x['version']}\`\" for x in m) or 'none')")
-          {
-            printf '**horizon-client.exe** for Windows x64, built from [`%s`](https://github.com/%s/commit/%s).\n\n' "$SHORT" "$UPSTREAM" "$SHA"
-            printf -- '- Revision: %s\n- Profile: `%s`\n- Mods: %s\n' "$LABEL" "$PROFILE" "$mods"
-            if [ "$mods" != none ]; then
-              printf -- '- Asked for %s; the mods pin the commit they were made for, so it was built on that one.\n' "$ASKED"
-              printf -- '- horizon-mixins `%s`\n' "${MIXINS:0:7}"
-            fi
-            printf -- '- Built by [run %s](%s/%s/actions/runs/%s)\n\n' "$GITHUB_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            printf 'Unsigned. Check it against `SHA256SUMS`. To play it, import it in the Horizon launcher (Versions, import a build): the program alone needs a version folder'"'"'s game files.\n'
-          } > notes.md
+          # The notes say which commit was really built and, when mods made it differ from the one asked for, why.
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" python3 scripts/release_notes.py > notes.md
+          cat notes.md
           # Building the same revision, profile and mods again replaces its release.
           gh release delete "$tag" --cleanup-tag --yes -R "$GITHUB_REPOSITORY" 2>/dev/null || true
           gh release create "$tag" dist/horizon-client.exe dist/SHA256SUMS \
@@ -310,3 +357,32 @@ jobs:
               echo "Removing $old"
               gh release delete "$old" --cleanup-tag --yes -R "$GITHUB_REPOSITORY"
             done
+
+  # Whatever happened (success, failure, cancelled), the temporary upload branch and the mods artifact are gone
+  # when the run ends. `mods` already deleted the branch; this makes sure, and removes the artifact.
+  cleanup:
+    needs: [mods, build, publish]
+    if: ${{ always() && inputs.mods_branch != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODS_BRANCH: ${{ inputs.mods_branch }}
+    steps:
+      - name: Delete the upload branch and the mods artifact
+        run: |
+          set -uo pipefail
+          [[ "$MODS_BRANCH" =~ ^hnmod-upload-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || exit 0
+          if gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$MODS_BRANCH" >/dev/null 2>&1; then
+            echo "Deleted $MODS_BRANCH"
+          else
+            echo "$MODS_BRANCH is already gone"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name == "hnmod-uploads") | .id' |
+            while read -r id; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null && echo "Deleted the mods artifact"
+            done || true

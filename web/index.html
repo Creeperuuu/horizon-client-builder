@@ -75,6 +75,15 @@ ul { list-style: none; margin: 0; padding: 0; }
 .meta { color: var(--soft); font-size: .86rem; grid-column: 1; }
 .meta a { color: inherit; }
 .row .btn { grid-column: 2; grid-row: 1 / span 2; }
+.badge { margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: .72rem; font-weight: 600; letter-spacing: .02em;
+  background: var(--amber); color: var(--ground); vertical-align: .12em; }
+.row.fallback { border-left-color: var(--amber); }
+.note { grid-column: 1 / -1; margin: 4px 0 0; font-size: .86rem; color: var(--soft); }
+.note.warn { color: var(--ink); background: var(--ground); border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 6px; padding: 8px 10px; }
+.note a { color: inherit; }
+.note ul.why { margin: 4px 0 0 18px; padding: 0; list-style: disc; }
+.note details { margin-top: 4px; }
+.note summary { cursor: pointer; }
 .sub { margin: 26px 0 4px; font-size: .92rem; font-weight: 600; color: var(--soft); }
 .empty { color: var(--soft); margin: 4px 0; }
 .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: var(--amber); margin-right: 8px; animation: pulse 1.4s ease-in-out infinite; }
@@ -113,7 +122,7 @@ code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-siz
 
       <label for="mods">Native mods <small>(optional, multiple .hnmod files)</small></label>
       <input id="mods" type="file" accept=".hnmod,application/zip" multiple>
-      <p class="hint">Selected .hnmod bundles are compiled into the client. Horizon pins and hook API requirements are checked before building. They are uploaded to a temporary branch of this public repository, so anyone can read them until it is deleted (within a day).</p>
+      <p class="hint">Selected .hnmod bundles are compiled into the client (up to 100 per build). Horizon pins and hook API requirements are checked before building. They are uploaded to a temporary branch of this public repository, which the build deletes within a minute of starting. If some mods don't support the revision you picked, the build falls back to a commit they do support, and the Builds list says which one.</p>
 
       <label for="token">GitHub token <small>(to upload mods and start the build)</small></label>
       <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="fine-grained: Actions + Contents read/write">
@@ -144,6 +153,9 @@ const [OWNER, REPO] = (() => {
 })();
 const UPSTREAM = "horizon-rust/horizon";
 const API = "https://api.github.com";
+// The same limits as scripts/prepare_mods.py.
+const MAX_MODS = 100, MAX_FILE = 40 * 1024 * 1024, MAX_TOTAL = 200 * 1024 * 1024;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const $ = (id) => document.getElementById(id);
 let token = "";
 
@@ -157,8 +169,11 @@ function el(tag, attrs = {}, ...kids) {
 }
 async function api(path, options = {}) {
   const headers = { Accept: "application/vnd.github+json", ...(options.headers || {}) };
-  if (options.auth && token) headers.Authorization = `Bearer ${token}`;
-  return fetch(API + path, { ...options, headers });
+  // A signed-in request has a far higher rate limit than an anonymous one (5000 an hour, not 60).
+  if (token) headers.Authorization = `Bearer ${token}`;
+  // GitHub lets a browser reuse an answer for a minute, which is why the list used to lag. "no-cache" asks every
+  // time instead, and an answer that has not changed (304) costs nothing against the rate limit.
+  return fetch(API + path, { cache: "no-cache", ...options, headers });
 }
 function ago(iso) {
   const s = (new Date(iso) - Date.now()) / 1000, f = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
@@ -187,6 +202,62 @@ async function loadNightlies() {
   } catch { $("nights").append(el("option", { value: "" }, "Could not load the Nightly list")); }
 }
 
+/* ---- uploading mods ---- */
+async function post(path, body) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (res.ok) return res.json();
+    const text = await res.text();
+    const wait = Number(res.headers.get("retry-after")) || 0;
+    // GitHub's secondary rate limit (many writes at once) asks to wait: do, a few times.
+    if ((res.status === 403 || res.status === 429) && attempt < 3 && (wait || /rate limit/i.test(text))) {
+      say("GitHub asked to slow down; waiting a moment…");
+      await sleep(Math.min(wait || 30, 120) * 1000);
+      continue;
+    }
+    if (res.status === 401) throw new Error("GitHub rejected the token.");
+    let message = text.slice(0, 200);
+    try { message = JSON.parse(text).message || message; } catch { /* not JSON */ }
+    if (res.status === 403 || res.status === 404) throw new Error(`The token can't write to this repository (it needs Contents: read and write): ${message}`);
+    throw new Error(`GitHub answered ${res.status}: ${message}`);
+  }
+}
+function toBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(reader.error || new Error("Could not read " + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+// All the files go up as blobs a few at a time, then become ONE commit on a new branch: many mods take about as
+// long as a few (a commit per file, one after another, used to take minutes). The commit has no parent, so the
+// branch holds nothing but the uploads, and the build deletes it as soon as it has copied them.
+async function uploadMods(files, branch) {
+  const git = `/repos/${OWNER}/${REPO}/git`;
+  const shas = new Array(files.length);
+  let next = 0, done = 0, failed = false;
+  const worker = async () => {
+    while (!failed && next < files.length) {
+      const i = next++;
+      try {
+        shas[i] = (await post(`${git}/blobs`, { content: await toBase64(files[i]), encoding: "base64" })).sha;
+      } catch (e) { failed = true; throw e; }
+      say(`Uploading mods… ${++done} of ${files.length}`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, files.length) }, worker));
+  say("Saving the temporary upload branch…");
+  const tree = await post(`${git}/trees`, {
+    tree: files.map((f, i) => ({ path: `.hnmod-uploads/${branch}/${f.name}`, mode: "100644", type: "blob", sha: shas[i] })),
+  });
+  const commit = await post(`${git}/commits`, { message: "Temporary native mod bundles", tree: tree.sha, parents: [] });
+  await post(`${git}/refs`, { ref: "refs/heads/" + branch, sha: commit.sha });
+}
+async function dropBranch(branch) {   // best effort: the build never started, so nothing else would clear it
+  if (branch) await api(`/repos/${OWNER}/${REPO}/git/refs/heads/${branch}`, { method: "DELETE" }).catch(() => {});
+}
+
 /* ---- starting a build ---- */
 $("token").addEventListener("input", (e) => { token = e.target.value.trim(); });
 $("go").addEventListener("click", async () => {
@@ -194,53 +265,98 @@ $("go").addEventListener("click", async () => {
   if (!rev) return say("Say which revision to build.", "err");
   if (!token) return say("Paste a token first: starting a build needs one.", "err");
   $("go").disabled = true; say("Starting…");
+  let modsBranch = "";
   try {
-    let modsBranch = "";
     const selected = [...$("mods").files];
     if (selected.length) {
-      if (selected.some(f => !f.name.toLowerCase().endsWith(".hnmod"))) throw new Error("Only .hnmod files are accepted.");
-      if (selected.length > 10 || selected.some(f => f.size > 40 * 1024 * 1024) || selected.reduce((n, f) => n + f.size, 0) > 200 * 1024 * 1024) throw new Error("Upload limit: 10 mods, 40 MiB each, 200 MiB total.");
-      if (selected.some(f => !/^[a-zA-Z0-9._-]+$/.test(f.name)) || new Set(selected.map(f => f.name)).size !== selected.length) throw new Error("Mod filenames may only contain letters, numbers, dots, underscores and hyphens; filenames must be unique.");
-      say("Preparing temporary upload branch…");
-      const tag = "hnmod-upload-" + crypto.randomUUID();
-      const base = await api(`/repos/${OWNER}/${REPO}/git/ref/heads/main`, { auth: true });
-      if (!base.ok) throw new Error("Could not read main branch (" + base.status + "): " + (await base.text()));
-      const baseData = await base.json();
-      const branchRes = await api(`/repos/${OWNER}/${REPO}/git/refs`, { method: "POST", auth: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref: "refs/heads/" + tag, sha: baseData.object.sha }) });
-      if (!branchRes.ok) throw new Error("Could not create temporary upload branch (" + branchRes.status + "): " + (await branchRes.text()));
-      for (const file of selected) {
-        say("Uploading " + file.name + "…");
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        let binary = "";
-        const chunk = 0x8000;
-        for (let offset = 0; offset < bytes.length; offset += chunk) binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunk, bytes.length)));
-        const encoded = btoa(binary);
-        const uploaded = await api(`/repos/${OWNER}/${REPO}/contents/.hnmod-uploads/${tag}/${encodeURIComponent(file.name)}`, { method: "PUT", auth: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: "Upload temporary native mod bundle", content: encoded, branch: tag }) });
-        if (!uploaded.ok) throw new Error("Upload failed for " + file.name + " (" + uploaded.status + "): " + (await uploaded.text()));
-      }
-      modsBranch = tag;
+      if (selected.some((f) => !f.name.toLowerCase().endsWith(".hnmod"))) throw new Error("Only .hnmod files are accepted.");
+      if (selected.length > MAX_MODS || selected.some((f) => f.size > MAX_FILE) || selected.reduce((n, f) => n + f.size, 0) > MAX_TOTAL)
+        throw new Error(`Upload limit: ${MAX_MODS} mods, 40 MiB each, 200 MiB total.`);
+      if (selected.some((f) => !/^[a-zA-Z0-9._-]+$/.test(f.name)) || new Set(selected.map((f) => f.name)).size !== selected.length)
+        throw new Error("Mod filenames may only contain letters, numbers, dots, underscores and hyphens; filenames must be unique.");
+      const branch = "hnmod-upload-" + crypto.randomUUID();
+      await uploadMods(selected, branch);
+      modsBranch = branch;
     }
+    say("Starting the build…");
     const res = await api(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/dispatches`, {
-      method: "POST", auth: true,
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ref: "main", inputs: { revision: rev, profile: $("profile").value, mods_branch: modsBranch } }),
     });
-    if (res.status === 204) { say("Build started. It shows under Builds in a moment; a release build takes a while.", "ok"); setTimeout(refresh, 4000); }
-    else if (res.status === 401) say("GitHub rejected the token.", "err");
-    else if (res.status === 403 || res.status === 404) say("The token can't start builds on this repository (it needs Actions: read and write).", "err");
-    else if (res.status === 422) say("GitHub refused the build's inputs: " + ((await res.json()).message || ""), "err");
-    else say(`GitHub answered ${res.status}: ${(await res.json()).message || ""}`, "err");
+    if (res.status === 204) {
+      say("Build started. It shows under Builds in a moment; a release build takes a while.", "ok");
+      setTimeout(refresh, 2500);
+    } else {
+      await dropBranch(modsBranch);
+      if (res.status === 401) say("GitHub rejected the token.", "err");
+      else if (res.status === 403 || res.status === 404) say("The token can't start builds on this repository (it needs Actions: read and write).", "err");
+      else if (res.status === 422) say("GitHub refused the build's inputs: " + ((await res.json()).message || ""), "err");
+      else say(`GitHub answered ${res.status}: ${(await res.json()).message || ""}`, "err");
+    }
   } catch (e) { say(e.message || "Could not reach GitHub.", "err"); }
   $("go").disabled = false;
 });
 
 /* ---- builds ---- */
+const POLL_BUSY = 5000, POLL_IDLE = 30000, POLL_HIDDEN = 60000;
+const isSha = (s) => /^[0-9a-f]{40}$/.test(s || "");
+let wasBusy = false;
+
+// What release_notes.py wrote for the site; null for a build made before it existed.
+function buildInfo(body) {
+  const m = /<!-- build-info ([\s\S]*?) -->/.exec(body || "");
+  if (!m) return null;
+  try {
+    const info = JSON.parse(m[1]);
+    return isSha(info?.built?.sha) && isSha(info?.requested?.sha) ? info : null;
+  } catch { return null; }
+}
+function commitLink(c) {
+  return isSha(c.sha) ? el("a", { href: `https://github.com/${UPSTREAM}/commit/${c.sha}`, target: "_blank", rel: "noopener" }, c.short || c.sha.slice(0, 7)) : String(c.short || "");
+}
+function modNames(release, info) {
+  if (info && Array.isArray(info.mods) && info.mods.length) return info.mods.map((m) => `${m.id} ${m.version}`);
+  const line = ((release.body || "").match(/- Mods: (.*)/) || [])[1];
+  return line && line !== "none" ? line.replace(/`/g, "").split(", ") : [];
+}
+function modsNote(names) {
+  if (names.length <= 6) return el("div", { class: "note" }, "Mods: " + names.join(", "));
+  return el("details", { class: "note" }, el("summary", {}, `Mods (${names.length})`), el("div", {}, names.join(", ")));
+}
+// Which commit the compiler fell back to, and why.
+function fallbackNote(info) {
+  const box = el("div", { class: "note warn" },
+    el("b", {}, "Fallback commit "), commitLink(info.built), ` (${info.built.label}). You asked for ${info.requested.label} (`,
+    commitLink(info.requested), "), but some mods don't support it.");
+  const why = Array.isArray(info.unsupported) ? info.unsupported : [];
+  if (why.length) {
+    const ul = el("ul", { class: "why" });
+    for (const u of why) ul.append(el("li", {}, el("code", {}, `${u.id} ${u.version}`), ": " + u.why));
+    box.append(ul);
+  }
+  const tried = Array.isArray(info.attempts) ? info.attempts : [];
+  if (tried.length > 1 || tried.some((a) => !a.ok)) {
+    const details = el("details", {}, el("summary", {}, `Commits tried (${tried.length})`));
+    for (const a of tried) details.append(el("div", {}, commitLink(a), a.ok ? " · built" : " · did not apply: " + (a.error || "")));
+    box.append(details);
+  }
+  return box;
+}
+
 async function refresh() {
-  let busy = false;
+  clearTimeout(refresh.t);
+  let busy = false, delay = POLL_IDLE;
   try {
     const get = async (path) => {
       const res = await api(path);
-      if (!res.ok) throw new Error(res.status === 403 ? "GitHub's rate limit is reached; try again in a few minutes" : `GitHub answered ${res.status}`);
-      return res.json();
+      if (res.ok) return res.json();
+      if ((res.status === 403 || res.status === 429) && res.headers.get("x-ratelimit-remaining") === "0") {
+        const reset = Number(res.headers.get("x-ratelimit-reset")) * 1000;
+        const error = new Error(`GitHub's rate limit is reached${token ? "" : " (paste a token below: signed-in requests get far more)"}; it resets ${ago(new Date(reset).toISOString())}`);
+        error.delay = Math.max(reset - Date.now(), 30000);
+        throw error;
+      }
+      throw new Error(`GitHub answered ${res.status}`);
     };
     const [runs, rels] = await Promise.all([
       get(`/repos/${OWNER}/${REPO}/actions/workflows/build.yml/runs?per_page=10`),
@@ -267,21 +383,31 @@ async function refresh() {
     for (const r of builds) {
       const exe = r.assets.find((a) => a.name === "horizon-client.exe");
       if (!exe) continue;
-      const sha = (r.body.match(/\/commit\/([0-9a-f]{40})/) || [])[1];
+      const info = buildInfo(r.body);
+      const sha = info ? info.built.sha : (r.body.match(/\/commit\/([0-9a-f]{40})/) || [])[1];
       const profile = /-fast(-m[0-9a-f]{8})?$/.test(r.tag_name) ? "fast" : "release";
-      const modsLine = ((r.body || "").match(/- Mods: (.*)/) || [])[1];
-      const modList = modsLine && modsLine !== "none" ? modsLine.replace(/`/g, "") : "";
+      const names = modNames(r, info);
+      const fell = !!(info && info.fell_back);
       const meta = el("span", { class: "meta" },
         sha ? el("a", { href: `https://github.com/${UPSTREAM}/commit/${sha}`, target: "_blank", rel: "noopener" }, sha.slice(0, 7)) : "",
-        `${sha ? " · " : ""}${profile} · ${(exe.size / 1048576).toFixed(0)} MB · ${ago(r.created_at)}`,
-        modList ? el("span", {}, el("br"), "Mods: " + modList) : "");
-      list.append(el("li", { class: "row " + profile },
-        el("b", {}, r.name.replace(/ \((release|fast)\)$/, "")), meta,
-        el("a", { class: "btn", href: exe.browser_download_url }, "Download")));
+        `${sha ? " · " : ""}${profile} · ${(exe.size / 1048576).toFixed(0)} MB · ${ago(r.created_at)}`);
+      const row = el("li", { class: "row " + profile + (fell ? " fallback" : "") },
+        el("b", {}, r.name.replace(/ \((release|fast)\)$/, ""), fell ? el("span", { class: "badge" }, "fallback") : ""), meta,
+        el("a", { class: "btn", href: exe.browser_download_url }, "Download"));
+      if (names.length) row.append(modsNote(names));
+      if (fell) row.append(fallbackNote(info));
+      list.append(row);
     }
-  } catch (e) { $("list").replaceChildren(el("li", { class: "empty" }, `Could not load builds: ${e.message || "no answer from GitHub"}.`)); }
-  clearTimeout(refresh.t); refresh.t = setTimeout(refresh, busy ? 15000 : 60000);
+  } catch (e) {
+    $("list").replaceChildren(el("li", { class: "empty" }, `Could not load builds: ${e.message || "no answer from GitHub"}.`));
+    delay = e.delay || delay;
+  }
+  // Quick while a build runs, once more soon after one finishes (its release appears just then), slow when idle.
+  const justFinished = wasBusy && !busy; wasBusy = busy;
+  const wait = justFinished ? 3000 : busy ? (document.hidden ? 15000 : POLL_BUSY) : document.hidden ? POLL_HIDDEN : delay;
+  refresh.t = setTimeout(refresh, wait);
 }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 loadNightlies(); refresh();
 </script>
 </body>

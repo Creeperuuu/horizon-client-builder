@@ -22,8 +22,10 @@ import tomllib
 import urllib.error
 import urllib.request
 import zipfile
+from functools import lru_cache
 
-MAX_MODS = 10
+# A build holds as many mods as fit the size limits; this only stops a runaway upload.
+MAX_MODS = 100
 MAX_FILE = 40 * 1024 * 1024
 MAX_TOTAL = 200 * 1024 * 1024
 MAX_ENTRIES = 512
@@ -36,6 +38,7 @@ def fail(message):
     raise SystemExit("::error::" + message)
 
 
+@lru_cache(maxsize=None)
 def date_key(revision, repository=UPSTREAM):
     """When `repository`'s commit `revision` was made (ISO 8601, so it sorts)."""
     req = urllib.request.Request(
@@ -319,6 +322,41 @@ def ensure_named_hook_catalog(tree, mods_dir):
             print(f"Generated native-hooks.json for {', '.join(sorted(hooks))}")
 
 
+HOOKS_API = re.compile(r"pub\(crate\) const NATIVE_HOOKS_API: u32 = (\d+);")
+
+
+def hooks_api(tree):
+    """`NATIVE_HOOKS_API` of the Horizon source in `tree`, or None when it can't be read."""
+    source = pathlib.Path(tree) / "crates/horizon-client/src/game/native_hooks.rs"
+    try:
+        match = HOOKS_API.search(source.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    return int(match.group(1)) if match else None
+
+
+def supports(record, requested, available):
+    """Whether a mod declares support for the `requested` commit, whose hook API is `available`.
+    -> (supported, why not). A mod that names a hook API version fits any commit whose API is at least that;
+    one that pins a commit fits that commit."""
+    if record["hooks"] > 0:
+        if available is None:
+            return False, f"needs hook API {record['hooks']}; this commit's could not be read"
+        if available >= record["hooks"]:
+            return True, ""
+        return False, f"needs hook API {record['hooks']}; {requested[:7]} has {available}"
+    if record["horizon"] == requested:
+        return True, ""
+    return False, f"pinned to {record['horizon'][:7]}"
+
+
+def short_error(text):
+    """One short line of a failed `apply`, fit to be stored in JSON and shown on the site."""
+    lines = [line.strip() for line in text.replace("\r", "").splitlines() if line.strip()]
+    pick = next((line for line in reversed(lines) if "error" in line.lower()), lines[-1] if lines else "failed")
+    return re.sub(r"\s+", " ", pick)[:240]
+
+
 def stage(args):
     mods_dir = pathlib.Path(args.mods)
     records = json.loads((mods_dir / "mods.json").read_text())
@@ -328,15 +366,16 @@ def stage(args):
     hook_mods = [m for m in records if m["hooks"] > 0]
     pinned_mods = [m for m in records if m["hooks"] == 0]
     candidates = sorted({m["horizon"] for m in records}, key=date_key, reverse=True)
+    # `tree` still holds the requested commit here: its hook API says which mods declare support for it.
+    available = hooks_api(tree)
+    verdicts = {m["id"]: supports(m, requested, available) for m in records}
     # Hook-only mods can target the selected build when its append-only hook API is new enough.
     if requested and hook_mods and not pinned_mods:
-        hooks_file = tree / "crates/horizon-client/src/game/native_hooks.rs"
-        match = re.search(r"pub\(crate\) const NATIVE_HOOKS_API: u32 = (\d+);", hooks_file.read_text(encoding="utf-8"))
-        available = int(match.group(1)) if match else -1
-        if available >= max(m["hooks"] for m in hook_mods):
+        if available is not None and available >= max(m["hooks"] for m in hook_mods):
             candidates = [requested]
     if not candidates:
         candidates = [requested]
+    attempts = []
     errors, built_any = [], False
     for revision in candidates:
         # The requested commit is already unpacked in `tree`: don't fetch it again.
@@ -369,14 +408,31 @@ def stage(args):
         applied = subprocess.run([str(cli), "apply", "--workspace", str(tree), "--mods", str(candidate_mods),
                                   "--out", str(modded)], text=True, capture_output=True)
         if applied.returncode:
-            errors.append(f"{revision[:7]}: {(applied.stderr or applied.stdout)[-3000:]}")
+            detail = (applied.stderr or applied.stdout)[-3000:]
+            errors.append(f"{revision[:7]}: {detail}")
+            attempts.append({"horizon": revision, "ok": False, "error": short_error(detail)})
             continue
-        chosen = {"horizon": revision, "requested": requested, "mixins": mixins_rev, "mods": [
-            {k: v for k, v in r.items() if k != "sha256"} for r in records]}
+        attempts.append({"horizon": revision, "ok": True})
+        mods = [{**{k: v for k, v in r.items() if k != "sha256"}, "supports_requested": verdicts[r["id"]][0]}
+                for r in records]
+        fallback = {
+            "requested": requested, "requested_hooks_api": available, "built": revision,
+            "fell_back": revision != requested,
+            # Only mods that declare no support for the requested commit explain a fallback.
+            "unsupported": [{"id": r["id"], "version": r["version"], "why": verdicts[r["id"]][1]}
+                            for r in records if not verdicts[r["id"]][0]],
+            "attempts": attempts,
+        }
+        chosen = {"horizon": revision, "requested": requested, "mixins": mixins_rev, "mods": mods,
+                  "fallback": fallback}
         (out / "chosen.json").write_text(json.dumps(chosen, indent=2) + "\n")
+        if fallback["fell_back"]:
+            print(f"Fallback: asked for {requested[:7]}, built on {revision[:7]} because "
+                  + (", ".join(f"{u['id']} ({u['why']})" for u in fallback["unsupported"]) or "the mods pin other commits"))
         print(f"Selected Horizon {revision}; horizon-mixins {mixins_rev}")
         set_output(horizon=revision, mixins=mixins_rev, built_mixins=str(built_any).lower(), digest=digest(records),
-                   mods=json.dumps(chosen["mods"], separators=(",", ":")))
+                   mods=json.dumps(mods, separators=(",", ":")),
+                   fallback=json.dumps(fallback, separators=(",", ":")))
         return
     set_output(built_mixins=str(built_any).lower())
     fail("No single Horizon revision accepts every selected mod.\n" + "\n".join(errors))
